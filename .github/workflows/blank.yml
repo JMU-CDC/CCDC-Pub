@@ -7,6 +7,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,6 +33,16 @@ jobs:
             --exclude='*.txz' \
             .
           mv "$RUNNER_TEMP/${{ github.event.repository.name }}.tar.gz" tarball/
+
+      # Only on pushes to main; PRs (esp. from forks) have a read-only token
+      - name: Commit tarball to repo
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tarball/
+          git diff --cached --quiet || git commit -m "Update tarball [skip ci]"
+          git push
 
       - name: Upload tarball
         uses: actions/upload-artifact@v4
