@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tarball
+        run: |
+          # Write the archive outside the workspace so it can't include itself
+          tar -czf "$RUNNER_TEMP/${{ github.event.repository.name }}.tar.gz" \
+            --exclude='.git' \
+            --exclude='*.tar' \
+            --exclude='*.tar.gz' \
+            --exclude='*.tgz' \
+            --exclude='*.tar.bz2' \
+            --exclude='*.tbz2' \
+            --exclude='*.tar.xz' \
+            --exclude='*.txz' \
+            .
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-tarball
+          path: ${{ runner.temp }}/${{ github.event.repository.name }}.tar.gz
