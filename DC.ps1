@@ -12,7 +12,6 @@ param(
     [string[]]$DisableUser = @(),
     [string]$RecoveryAdminName,
     [string]$SystemStateBackupTarget,
-    [switch]$RotateKrbtgtOnce,
     [string]$ReportRoot = "$env:ProgramData\CCDC\ServerAD"
 )
 
@@ -23,8 +22,6 @@ $script:CanWriteReport = $false
 $script:CreatedRecovery = $null
 $script:FirewallServicesReady = $false
 $script:SystemStateBackupVerified = $false
-
-if ($RotateKrbtgtOnce -and $Mode -eq 'Audit') { throw 'KRBTGT rotation is unavailable in Audit mode.' }
 
 function Read-StepChoice {
     param([string]$Name)
@@ -493,26 +490,13 @@ function Wait-KrbtgtReplication {
 }
 
 function Reset-KrbtgtKeyOnce {
-    param([string]$Identity, [string]$Server, $Expected)
+    param([string]$Identity, [string]$Server, $Expected,
+        [Parameter(Mandatory)][securestring]$NewPassword)
     $current = Get-KrbtgtKeyState -Identity $Identity -Server $Server
     if ($current.Version -ne $Expected.Version -or $current.PasswordLastSet -ne $Expected.PasswordLastSet) {
         throw 'KRBTGT changed since the last check; no additional reset was performed.'
     }
-    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
-    $bytes = New-Object byte[] 64
-    $secret = New-Object securestring
-    try {
-        $random.GetBytes($bytes)
-        $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-        foreach ($byte in $bytes) { $secret.AppendChar($alphabet[[int]$byte -band 63]) }
-        foreach ($character in 'aA1!'.ToCharArray()) { $secret.AppendChar($character) }
-        $secret.MakeReadOnly()
-        Set-ADAccountPassword -Identity $Identity -Reset -NewPassword $secret -Server $Server -Confirm:$false -ErrorAction Stop
-    } finally {
-        [array]::Clear($bytes, 0, $bytes.Length)
-        $secret.Dispose()
-        $random.Dispose()
-    }
+    Set-ADAccountPassword -Identity $Identity -Reset -NewPassword $NewPassword -Server $Server -Confirm:$false -ErrorAction Stop
     $actual = Get-KrbtgtKeyState -Identity $Identity -Server $Server
     if ($actual.Version -ne ($Expected.Version + 1) -or $actual.PasswordLastSet -le $Expected.PasswordLastSet) {
         throw 'KRBTGT reset was attempted but metadata verification failed. Do not repeat the reset without reviewing its state.'
@@ -526,7 +510,7 @@ function Invoke-KrbtgtRotation {
     }
     $localDc = Get-ADDomainController -Identity $env:COMPUTERNAME -Server $adServer -ErrorAction Stop
     if ($localDc.IsReadOnly -or $localDc.HostName -ine $domain.PDCEmulator) {
-        throw 'Run the optional KRBTGT workflow locally on the writable PDC emulator so its effective ticket policy can be checked.'
+        throw 'Run the KRBTGT workflow locally on the writable PDC emulator so its effective ticket policy can be checked.'
     }
     $identity = "$($domain.DomainSID.Value)-502"
     $statePath = Join-Path $report 'krbtgt-rotation.json'
@@ -541,7 +525,10 @@ function Invoke-KrbtgtRotation {
     $state = [ordered]@{Domain=$domain.DNSRoot;Server=$adServer;Phase='ResetPending';Before=$before;After=$null}
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8 -ErrorAction Stop
     Write-Warning 'KRBTGT rotation is starting. Notify the AD/Windows, SQL, application and scoring operators. User/service passwords do not change; authentication may require recovery if dependencies or replication are unhealthy.'
-    $after = Reset-KrbtgtKeyOnce -Identity $identity -Server $adServer -Expected $before
+    Write-Host 'Enter and confirm a password using the hidden prompts. Windows generates its own KRBTGT secret internally; this is not a normal login password and must not be submitted to scoring.'
+    $secret = Read-NewPassword -Account krbtgt
+    try { $after = Reset-KrbtgtKeyOnce -Identity $identity -Server $adServer -Expected $before -NewPassword $secret }
+    finally { $secret.Dispose() }
     $state.After = $after
     $state.Phase = 'ResetApplied'
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8 -ErrorAction Stop
@@ -552,13 +539,74 @@ function Invoke-KrbtgtRotation {
 }
 
 function Get-DefenderRuntimeStatus {
-    try { return Get-MpComputerStatus -ErrorAction Stop }
+    try {
+        $status = @(Get-MpComputerStatus -ErrorAction Stop)
+        if ($status.Count -ne 1) { throw 'Defender status query did not return one result.' }
+        return $status[0]
+    }
     catch {
         $providerError = $_.Exception.Message
+        try {
+            $status = @(Get-WmiObject -Namespace 'root\Microsoft\Windows\Defender' -Class MSFT_MpComputerStatus -ErrorAction Stop)
+            if ($status.Count -ne 1) { throw 'Legacy Defender status query did not return one result.' }
+            Write-Warning "Defender CIM query failed: $providerError Read status through legacy WMI instead."
+            return $status[0]
+        } catch { $legacyError = $_.Exception.Message }
         $serviceState = 'unavailable'
         try { $serviceState = [string](Get-Service -Name WinDefend -ErrorAction Stop).Status } catch {}
-        throw "Defender status could not be read through its CIM provider: $providerError WinDefend service: $serviceState. Protection state is unverified; internet access does not fix this management error."
+        throw "Defender status is unverified. CIM: $providerError Legacy WMI: $legacyError WinDefend service: $serviceState. Signature updates and service presence do not prove real-time protection is active."
     }
+}
+
+function Enable-DefenderRealtimeProtection {
+    $before = $null
+    try { $before = Get-DefenderRuntimeStatus }
+    catch { Write-Warning "Initial Defender status is unavailable: $($_.Exception.Message) The approved enable action will still be attempted through supported interfaces." }
+    if ($null -ne $before -and $before.AMRunningMode -match 'Passive|EDR Block') {
+        throw "Defender is in $($before.AMRunningMode) mode. Verify the primary antivirus product; active mode was not forced."
+    }
+    $service = Get-Service -Name WinDefend -ErrorAction Stop
+    if ($service.Status -ne 'Running') {
+        Write-Host 'Starting the installed Microsoft Defender Antivirus service.'
+        Start-Service -Name WinDefend -ErrorAction Stop
+        $service.WaitForStatus('Running', [timespan]::FromSeconds(15))
+    }
+    if ((Get-Service -Name WinDefend -ErrorAction Stop).Status -ne 'Running') {
+        throw 'WinDefend did not start. Review the service error and antivirus policy; no startup permissions or protection controls were changed.'
+    }
+    $enableRequested = $false
+    if ($null -eq $before -or !$before.AMServiceEnabled -or !$before.AntivirusEnabled -or !$before.RealTimeProtectionEnabled) {
+        Write-Host 'Requesting Microsoft Defender real-time protection ON (DisableRealtimeMonitoring=false).'
+        try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop }
+        catch {
+            $providerError = $_.Exception.Message
+            Write-Warning "Defender CIM preference update failed: $providerError Trying the supported legacy WMI Set method."
+            try {
+                $preferenceClass = Get-WmiObject -Namespace 'root\Microsoft\Windows\Defender' -Class MSFT_MpPreference -List -ErrorAction Stop
+                $parameters = $preferenceClass.GetMethodParameters('Set')
+                $parameters['DisableRealtimeMonitoring'] = $false
+                $result = $preferenceClass.InvokeMethod('Set', $parameters, $null)
+                if ($null -eq $result -or $null -eq $result.ReturnValue -or [uint32]$result.ReturnValue -ne 0) {
+                    throw "Defender legacy WMI Set did not return success (code: $($result.ReturnValue))."
+                }
+            } catch {
+                throw "Real-time protection could not be enabled. CIM: $providerError Legacy WMI: $($_.Exception.Message) Review Defender policy, tamper protection and management-provider health."
+            }
+        }
+        $enableRequested = $true
+    }
+    try { $after = Get-DefenderRuntimeStatus }
+    catch {
+        if ($enableRequested) {
+            throw "The enable request was submitted, but protection status is still unverified: $($_.Exception.Message) Check Windows Security > Virus & threat protection > Manage settings > Real-time protection."
+        }
+        throw "Defender was reported active before this action, but final verification failed: $($_.Exception.Message)"
+    }
+    $after | Select-Object AMRunningMode,AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled
+    if (!$after.AMServiceEnabled -or !$after.AntivirusEnabled -or !$after.RealTimeProtectionEnabled) {
+        throw 'Defender real-time protection did not verify as active. Review effective policy and protection status; no protection controls were bypassed.'
+    }
+    Write-Host 'Microsoft Defender Antivirus and real-time protection verified ON.'
 }
 
 function Get-DefenderCommandPath {
@@ -590,6 +638,102 @@ function Update-DefenderSignatures {
     Write-Host "Running $commandPath -SignatureUpdate"
     Invoke-Native $commandPath @('-SignatureUpdate')
     Write-Host 'Native signature update command succeeded. This does not enable or verify real-time protection or ASR rules.'
+}
+
+function Invoke-DefenderDism {
+    param([string[]]$Arguments, [int[]]$AllowedExitCode=@(0))
+    $ErrorActionPreference = 'Continue'
+    $output = @(& "$env:SystemRoot\System32\dism.exe" @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    $text = $output -join [Environment]::NewLine
+    if ($exitCode -notin $AllowedExitCode) {
+        throw "DISM $($Arguments -join ' ') failed (exit $exitCode): $text"
+    }
+    [pscustomobject]@{ExitCode=$exitCode;Output=$text}
+}
+
+function Get-DefenderFeatureState {
+    $result = Invoke-DefenderDism -Arguments @('/Online','/Get-FeatureInfo','/FeatureName:Windows-Defender','/English')
+    $states = [regex]::Matches($result.Output, '(?im)^\s*State\s*:\s*([^\r\n]+)\s*$')
+    if ($states.Count -ne 1) { throw 'DISM did not return one recognizable Windows-Defender feature state.' }
+    $state = $states[0].Groups[1].Value.Trim()
+    if ($state -notin @('Enabled','Disabled','Disabled with Payload Removed','Enable Pending','Disable Pending')) {
+        throw "Unrecognized Defender feature state: $state"
+    }
+    return $state
+}
+
+function Write-DefenderInstallRetry {
+    $commands = @'
+dism.exe /Online /Enable-Feature /FeatureName:Windows-Defender /All /NoRestart
+if ($LASTEXITCODE -notin @(0,3010)) { throw 'Defender feature installation failed. Check DISM output, Windows Update/WSUS policy, or a matching Windows repair source.' }
+if ($LASTEXITCODE -eq 3010) { Write-Warning 'Installation requires a planned reboot. Restart when coordinated, then rerun this file to update signatures.'; return }
+& "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -SignatureUpdate
+if ($LASTEXITCODE -ne 0) { throw 'Defender signature update failed. Review the updater output and verify protection separately.' }
+Get-Service -Name WinDefend
+try { $status = Get-MpComputerStatus -ErrorAction Stop }
+catch { $status = Get-WmiObject -Namespace 'root\Microsoft\Windows\Defender' -Class MSFT_MpComputerStatus -ErrorAction Stop }
+$status | Select-Object AMRunningMode,AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureVersion
+if (!$status.AntivirusEnabled -or !$status.RealTimeProtectionEnabled) { throw 'Defender protection is not verified as active. Review the antivirus mode and effective policy.' }
+'@
+    Write-Host 'Defender installation retry command (run elevated when the required local/update source is available):' -ForegroundColor Yellow
+    Write-Host 'dism.exe /Online /Enable-Feature /FeatureName:Windows-Defender /All /NoRestart'
+    Write-Host 'Microsoft PowerShell alternative: Install-WindowsFeature -Name Windows-Defender'
+    Write-Host 'An internet connection alone does not guarantee Windows Update/WSUS access. A removed payload may require matching Windows Server installation media or an approved repair source. No automatic reboot is requested.'
+    if ($script:CanWriteReport) {
+        $path = Join-Path $report 'Defender-Install-Later.ps1'
+        Set-Content -LiteralPath $path -Value $commands -Encoding UTF8 -ErrorAction Stop
+        Write-Host "Installation/update retry commands saved to $path"
+    }
+}
+
+function Ensure-DefenderFeatureInstalled {
+    try { $state = Get-DefenderFeatureState }
+    catch {
+        Write-DefenderInstallRetry
+        throw "Could not determine whether the Defender feature is installed; no installation was attempted. $($_.Exception.Message)"
+    }
+    Write-Host "Native DISM Defender feature state: $state"
+    if ($state -in @('Enable Pending','Disable Pending')) {
+        Write-DefenderInstallRetry
+        Write-Warning "Defender servicing is $state. Coordinate a reboot, then recheck/retry installation. Protection is not verified."
+        return [pscustomobject]@{Outcome=$state;RestartNeeded=$true;ProtectionVerified=$false}
+    }
+    if ($state -eq 'Enabled') {
+        $services = @(Get-Service -ErrorAction Stop | Where-Object Name -eq 'WinDefend')
+        $commandPath = $null
+        try { $commandPath = Get-DefenderCommandPath } catch {}
+        if ($services.Count -and $commandPath) {
+            Write-Host "Defender is installed; WinDefend service: $($services[0].Status). No reinstall was attempted. A running service and existing executable do not verify real-time protection or repair the CIM provider."
+            return [pscustomobject]@{Outcome='Already installed';RestartNeeded=$false;ProtectionVerified=$false}
+        }
+        Write-DefenderInstallRetry
+        Write-Host 'If Defender files were deleted or corrupted while the feature remained enabled, review these native OS repair commands separately:'
+        Write-Host 'dism.exe /Online /Cleanup-Image /RestoreHealth'
+        Write-Host 'sfc.exe /scannow'
+        throw 'The Defender feature is enabled but its service or native updater is missing. Enabling an already-enabled feature cannot prove deleted files are repaired; inspect component-store/file integrity and the DISM log.'
+    }
+    Write-DefenderInstallRetry
+    Write-Host 'Installing the missing Defender feature using native DISM. Local payload is used when available; configured update/repair sources may be needed.'
+    try {
+        $installation = Invoke-DefenderDism -Arguments @('/Online','/Enable-Feature','/FeatureName:Windows-Defender','/All','/NoRestart','/English') -AllowedExitCode @(0,3010)
+        Write-Host $installation.Output
+    } catch {
+        throw "Defender installation could not complete. If offline or the update/repair source is unavailable, rerun the printed/saved command once access is restored. Installation is not verified. $($_.Exception.Message)"
+    }
+    if ($installation.ExitCode -eq 3010) {
+        return [pscustomobject]@{Outcome='Installed; restart required';RestartNeeded=$true;ProtectionVerified=$false}
+    }
+    $after = Get-DefenderFeatureState
+    if ($after -eq 'Enable Pending') {
+        return [pscustomobject]@{Outcome='Installation pending restart';RestartNeeded=$true;ProtectionVerified=$false}
+    }
+    if ($after -ne 'Enabled') { throw "Defender installation returned success but feature readback is '$after'." }
+    $services = @(Get-Service -ErrorAction Stop | Where-Object Name -eq 'WinDefend')
+    if (!$services.Count) { throw 'Defender feature is enabled but WinDefend was not found after installation. Review servicing and restart requirements.' }
+    $commandPath = Get-DefenderCommandPath
+    Write-Host "Defender feature installation verified. WinDefend: $($services[0].Status); updater: $commandPath. Update signatures and verify real-time protection after any required reboot."
+    [pscustomobject]@{Outcome='Installed';RestartNeeded=$false;ProtectionVerified=$false}
 }
 
 function Enable-LsassAsrRule {
@@ -628,9 +772,10 @@ function Enable-LsassAsrRule {
 }
 
 function Set-RegistryDword {
-    param([string]$Description, [string]$Path, [string]$Name, [int]$Value)
+    param([string]$Description, [string]$Path, [string]$Name, [int]$Value,
+        [ValidateSet('Completed','PendingRestart')][string]$CompletionStatus='Completed')
     $registryValueName = $Name
-    Invoke-Step "$Description ($Name = $Value)" {
+    Invoke-Step "$Description ($Name = $Value)" -CompletionStatus $CompletionStatus {
         $operation = 'check key'
         try {
             if (!(Test-Path -LiteralPath $Path -ErrorAction Stop)) {
@@ -1201,12 +1346,14 @@ if ($Mode -ne 'Audit') {
         } | Out-Null
     }
     foreach ($tunnel in 'teredo','6to4','isatap') {
-        Invoke-Step "Disable IPv6 $tunnel tunnel (native IPv6 stays enabled)" {
+        Invoke-Step "Disable IPv6 $tunnel tunnel" {
             $arguments = if ($tunnel -eq 'teredo') { @('interface','teredo','set','state','disabled') }
                 else { @('interface','ipv6',$tunnel,'set','state','state=disabled') }
             Invoke-Native netsh.exe $arguments
         } | Out-Null
     }
+    Set-RegistryDword 'Keep native IPv6 enabled and undo any previous DisabledComponents setting (restart required if previously disabled)' `
+        'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' 'DisabledComponents' 0 -CompletionStatus PendingRestart
     foreach ($serviceName in 'Spooler','RemoteRegistry') {
         Invoke-Step "Stop service $serviceName" {
             Stop-Service -Name $serviceName -Force
@@ -1285,24 +1432,7 @@ if ($Mode -ne 'Audit') {
     Set-RegistryDword 'Enable UAC (may require a later reboot)' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLUA' 1
     Set-RegistryDword 'Require administrator consent on the secure desktop' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin' 2
     Invoke-Step 'Enable Microsoft Defender real-time protection and verify active status' {
-        foreach ($command in 'Get-MpComputerStatus','Set-MpPreference') {
-            if (!(Get-Command $command -ErrorAction SilentlyContinue)) {
-                throw 'Defender commands are unavailable. Verify protection in the installed antivirus product or install/configure Defender separately.'
-            }
-        }
-        $before = Get-DefenderRuntimeStatus
-        if ($before.AMRunningMode -match 'Passive|EDR Block') {
-            throw "Defender is in $($before.AMRunningMode) mode. Verify real-time protection in the primary antivirus product; active mode was not forced."
-        }
-        if (!$before.AMServiceEnabled) {
-            throw 'Defender antivirus service is not running. Review service status and applied policy, then retry.'
-        }
-        Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop
-        $status = Get-DefenderRuntimeStatus
-        $status | Select-Object AMRunningMode,AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled
-        if (!$status.AMServiceEnabled -or !$status.AntivirusEnabled -or !$status.RealTimeProtectionEnabled) {
-            throw 'Defender real-time protection is not active after the request. Review applied policy, tamper protection, and antivirus/service configuration; no protection controls were bypassed.'
-        }
+        Enable-DefenderRealtimeProtection
     } | Out-Null
     Invoke-Step 'Update Microsoft Defender signatures (uses native MpCmdRun if the PowerShell update fails)' { Update-DefenderSignatures } | Out-Null
     Write-Host "`n5. AD hardening and triage" -ForegroundColor Cyan
@@ -1371,13 +1501,25 @@ Export-Evidence 'RecentEvents' {
 }
 Export-Evidence 'DefenderStatus' { Get-DefenderRuntimeStatus }
 Invoke-Step 'Review AD CS and KRBTGT recovery requirements manually' {
-    Write-Host 'Review CA/template permissions and requests. Optional -RotateKrbtgtOnce offers one guarded reset after checking backup, replication and time since any prior reset. Without that switch, KRBTGT is unchanged.'
+    Write-Host 'Review CA/template permissions and requests. Guided mode offers one KRBTGT reset with a hidden password prompt after checking backup, replication and time since any prior reset. Audit/WhatIf do not reset passwords.'
 } | Out-Null
 Invoke-Step 'Review incident-response follow-up manually' {
     Write-Host 'Test DNS, Kerberos, LDAP, SYSVOL, replication, console access and scoring. Use Sysinternals/external scans. Review evidence before killing processes or deleting tasks/services/registry entries. Record incidents. No automatic reboot.'
 } | Out-Null
-if ($RotateKrbtgtOnce) {
-    Invoke-Step 'Rotate KRBTGT ONCE with healthy replication and a verified system-state backup (no second reset is scheduled)' {
+if ($Mode -ne 'Audit') {
+    Invoke-Step 'Check Defender installation and install its Windows Server feature if missing (native DISM; no automatic reboot)' {
+        $installation = Ensure-DefenderFeatureInstalled
+        $installation | Format-List | Out-Host
+        if ($installation.RestartNeeded) {
+            $script:Results.Add([pscustomobject]@{Step='Defender feature servicing';Status='PendingRestart';Error='Coordinate a reboot, then recheck feature installation, update signatures and verify protection. No automatic reboot was performed.'})
+        } elseif ($installation.Outcome -eq 'Installed') {
+            Update-DefenderSignatures
+        }
+    } | Out-Null
+}
+if ($Mode -ne 'Audit') {
+    Invoke-Step 'Reset KRBTGT ONCE (asks for a password; requires healthy replication and a verified system-state backup)' {
+        Write-Warning 'A single reset retains the previous KRBTGT key. It does not by itself evict attackers or complete recovery from stolen KRBTGT keys.'
         Invoke-KrbtgtRotation
     } | Out-Null
 }
@@ -1394,7 +1536,7 @@ if ($script:CanWriteReport) {
 $script:Results | Format-Table -AutoSize
 $pendingRestartSteps = @($script:Results | Where-Object Status -eq 'PendingRestart')
 if ($pendingRestartSteps.Count) {
-    Write-Warning "$($pendingRestartSteps.Count) step(s) saved settings that require a planned restart and verification. Active SMB protection was not verified. No automatic restart was performed."
+    Write-Warning "$($pendingRestartSteps.Count) step(s) saved settings that require a planned restart and verification. Their active runtime settings were not verified. No automatic restart was performed."
 }
 $failedSteps = @($script:Results | Where-Object Status -eq 'Failed')
 if ($failedSteps.Count) {
