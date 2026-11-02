@@ -651,10 +651,31 @@ function Invoke-InitialServiceBackups {
 
 }
 
-$computer = Get-CimInstance Win32_ComputerSystem
-if ($computer.DomainRole -notin 4, 5) { throw 'Run this AD plan on a domain controller.' }
-Import-Module ActiveDirectory
-Import-Module NetSecurity
+function Assert-LocalDomainController {
+    $computer = $null
+    try {
+        $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    } catch {
+        Write-Warning "CIM domain-controller check failed: $($_.Exception.Message) Checking local AD DS and Active Directory instead. Other CIM-based actions may also fail."
+    }
+    if ($null -ne $computer) {
+        if ($computer.DomainRole -notin 4, 5) { throw 'Run this AD plan on a domain controller.' }
+        return
+    }
+    try {
+        $ntds = Get-Service -Name NTDS -ErrorAction Stop
+        if ($ntds.Status -ne 'Running') { throw 'The local AD DS (NTDS) service is not running.' }
+        $dc = Get-ADDomainController -Identity $env:COMPUTERNAME -Server $env:COMPUTERNAME -ErrorAction Stop
+        if ($null -eq $dc) { throw 'Active Directory did not identify this computer as a domain controller.' }
+    } catch {
+        throw "Cannot verify this machine as an active local domain controller without CIM. No hardening actions were started. $($_.Exception.Message)"
+    }
+    Write-Host 'Local domain controller verified using AD DS and Active Directory; CIM/WMI still needs investigation.'
+}
+
+Import-Module ActiveDirectory -ErrorAction Stop
+Assert-LocalDomainController
+Import-Module NetSecurity -ErrorAction Stop
 $adServer = $env:COMPUTERNAME
 $domain = Get-ADDomain -Server $adServer
 $administrator = Get-ADUser -Identity "$($domain.DomainSID.Value)-500" -Server $adServer
