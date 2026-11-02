@@ -34,13 +34,13 @@ function Read-StepChoice {
 }
 
 function Invoke-Step {
-    param([string]$Name, [scriptblock]$Action)
+    param([Alias('Name')][string]$StepName, [scriptblock]$Action)
     $status = 'Skipped'
     $errorText = ''
     try {
-        if (!$script:RunContext.ShouldProcess($Name, 'Run guided plan action')) {
+        if (!$script:RunContext.ShouldProcess($StepName, 'Run guided plan action')) {
             $status = if ($WhatIfPreference) { 'Preview' } else { 'Skipped' }
-        } elseif (Read-StepChoice $Name) {
+        } elseif (Read-StepChoice $StepName) {
             & $Action | Out-Host
             $status = 'Completed'
         }
@@ -50,10 +50,10 @@ function Invoke-Step {
         $status = 'Failed'
         $errorText = $_.Exception.Message
     }
-    $script:Results.Add([pscustomobject]@{ Step=$Name; Status=$status; Error=$errorText })
-    if ($status -eq 'Failed') { Write-Warning "$Name FAILED: $errorText. Review this before running the next action." }
-    elseif ($errorText) { Write-Host "[$status] $Name ($errorText)" }
-    else { Write-Host "[$status] $Name" }
+    $script:Results.Add([pscustomobject]@{ Step=$StepName; Status=$status; Error=$errorText })
+    if ($status -eq 'Failed') { Write-Warning "$StepName FAILED: $errorText. Review this before running the next action." }
+    elseif ($errorText) { Write-Host "[$status] $StepName ($errorText)" }
+    else { Write-Host "[$status] $StepName" }
     return ($status -eq 'Completed')
 }
 
@@ -394,10 +394,23 @@ function Enable-LsassAsrRule {
 
 function Set-RegistryDword {
     param([string]$Description, [string]$Path, [string]$Name, [int]$Value)
+    $registryValueName = $Name
     Invoke-Step "$Description ($Name = $Value)" {
-        New-Item -Path $Path -Force | Out-Null
-        New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
-        if ((Get-ItemProperty -Path $Path -Name $Name).$Name -ne $Value) { throw 'Registry readback did not match.' }
+        $operation = 'check key'
+        try {
+            if (!(Test-Path -LiteralPath $Path -ErrorAction Stop)) {
+                $operation = 'create key'
+                New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+            }
+            $operation = 'write DWORD value'
+            New-ItemProperty -LiteralPath $Path -Name $registryValueName -Value $Value -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            $operation = 'verify DWORD value'
+            if ((Get-ItemProperty -LiteralPath $Path -Name $registryValueName -ErrorAction Stop).$registryValueName -ne $Value) {
+                throw 'Registry readback did not match.'
+            }
+        } catch {
+            throw "Registry operation '$operation' failed for '${Path}\${registryValueName}': $($_.Exception.Message) [$($_.FullyQualifiedErrorId)]"
+        }
     } | Out-Null
 }
 
@@ -405,15 +418,25 @@ function Set-AllowRule {
     param([string]$Name, [string]$Protocol, [string[]]$Port, [string[]]$Address)
     $ruleName = "CCDC-AD-$Name"
     return (Invoke-Step "Allow $Protocol ports $($Port -join ',') from $($Address -join ',') [$ruleName]" {
-        $existing = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
+        $existing = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object Name -eq $ruleName)
         if ($existing) {
-            $existing | Set-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -Profile Any
-            $existing | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter -Protocol $Protocol -LocalPort $Port
-            $existing | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress $Address
+            $existing | Set-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -Profile Any -ErrorAction Stop
+            $existing | Get-NetFirewallPortFilter -ErrorAction Stop | Set-NetFirewallPortFilter -Protocol $Protocol -LocalPort $Port -ErrorAction Stop
+            $existing | Get-NetFirewallAddressFilter -ErrorAction Stop | Set-NetFirewallAddressFilter -RemoteAddress $Address -ErrorAction Stop
         } else {
             New-NetFirewallRule -Name $ruleName -DisplayName $ruleName -Group 'CCDC Server AD' `
                 -Enabled True -Direction Inbound -Action Allow -Profile Any -Protocol $Protocol `
-                -LocalPort $Port -RemoteAddress $Address | Out-Null
+                -LocalPort $Port -RemoteAddress $Address -ErrorAction Stop | Out-Null
+        }
+        $verified = @(Get-NetFirewallRule -Name $ruleName -PolicyStore PersistentStore -ErrorAction Stop)
+        if ($verified.Count -ne 1 -or [string]$verified[0].Enabled -ne 'True' -or [string]$verified[0].Direction -ne 'Inbound' -or [string]$verified[0].Action -ne 'Allow') {
+            throw "Firewall rule $ruleName did not read back as an enabled inbound allow rule."
+        }
+        $portFilter = $verified[0] | Get-NetFirewallPortFilter -ErrorAction Stop
+        $addressFilter = $verified[0] | Get-NetFirewallAddressFilter -ErrorAction Stop
+        if ([string]$portFilter.Protocol -ne $Protocol -or ((@($portFilter.LocalPort) | Sort-Object) -join ',') -ne (($Port | Sort-Object) -join ',') -or
+            ((@($addressFilter.RemoteAddress) | Sort-Object) -join ',') -ne (($Address | Sort-Object) -join ',')) {
+            throw "Firewall rule $ruleName port/address readback did not match the requested settings."
         }
     })
 }
@@ -752,7 +775,7 @@ Invoke-Step 'Back up ALL discovered services BEFORE password or hardening change
     $baselineResult = Invoke-InitialServiceBackups @options
     if ($baselineResult.FailedCount -gt 0) { throw 'Service discovery/backups have failures. Review ServiceBaseline/backup-status.csv before proceeding; some recovery gaps may remain.' }
 } | Out-Null
-Export-Evidence 'Services-Before' { Get-CimInstance Win32_Service | Select-Object Name, State, StartMode, StartName, PathName }
+Export-Evidence 'Services-Before' { Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name, State, StartMode, StartName, PathName }
 if ($script:CanWriteReport) {
     Invoke-Step 'Export original firewall policy' { Invoke-Native netsh.exe @('advfirewall','export',(Join-Path $report 'firewall-before.wfw')) } | Out-Null
     Invoke-Step 'Export original audit policy' { Invoke-Native auditpol.exe @('/backup',"/file:$(Join-Path $report 'audit-before.csv')") } | Out-Null
@@ -898,29 +921,45 @@ if ($Mode -ne 'Audit') {
     Write-Host "`n3. Firewall and connections" -ForegroundColor Cyan
     $tcpReady = Set-AllowRule 'Domain-TCP' TCP @('53','88','135','389','445','464','636','3268','3269','49152-65535') $DomainClientAddress
     $udpReady = Set-AllowRule 'Domain-UDP' UDP @('53','88','123','389','464') $DomainClientAddress
-    foreach ($port in $ScoredTcpPort) { Set-AllowRule "Scored-TCP-$port" TCP @("$port") @('Any') | Out-Null }
-    foreach ($port in $ScoredUdpPort) { Set-AllowRule "Scored-UDP-$port" UDP @("$port") @('Any') | Out-Null }
-    Invoke-Step 'Allow inbound ICMPv4 echo requests for reachability/scoring checks' {
-        if (!(Get-NetFirewallRule -Name CCDC-AD-ICMP -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule -Name CCDC-AD-ICMP -DisplayName CCDC-AD-ICMP -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -Profile Any | Out-Null
+    $scoredRulesReady = $true
+    foreach ($port in $ScoredTcpPort) {
+        if (!(Set-AllowRule "Scored-TCP-$port" TCP @("$port") @('Any'))) { $scoredRulesReady = $false }
+    }
+    foreach ($port in $ScoredUdpPort) {
+        if (!(Set-AllowRule "Scored-UDP-$port" UDP @("$port") @('Any'))) { $scoredRulesReady = $false }
+    }
+    $icmpReady = Invoke-Step 'Allow inbound ICMPv4 echo requests for reachability/scoring checks' {
+        $icmpRule = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object Name -eq 'CCDC-AD-ICMP')
+        if ($icmpRule.Count) {
+            $icmpRule | Set-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -Profile Any -ErrorAction Stop
+            $icmpRule | Get-NetFirewallPortFilter -ErrorAction Stop | Set-NetFirewallPortFilter -Protocol ICMPv4 -IcmpType 8 -ErrorAction Stop
+            $icmpRule | Get-NetFirewallAddressFilter -ErrorAction Stop | Set-NetFirewallAddressFilter -RemoteAddress Any -ErrorAction Stop
+        } else {
+            New-NetFirewallRule -Name CCDC-AD-ICMP -DisplayName CCDC-AD-ICMP -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -Profile Any -ErrorAction Stop | Out-Null
         }
-    } | Out-Null
+    }
     Invoke-Step 'Enable Windows Firewall on all profiles after preparing AD allow rules' {
-        if (!$tcpReady -or !$udpReady) {
-            throw 'Required AD allow rules were skipped or failed. Firewall activation was not changed; review existing rules manually.'
+        if (!$tcpReady -or !$udpReady -or !$scoredRulesReady -or !$icmpReady) {
+            throw 'Required AD, scoring, or ICMP allow rules were skipped or failed. Firewall activation was not changed; review existing rules manually.'
         }
-        Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True
+        Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -ErrorAction Stop
     } | Out-Null
     Invoke-Step 'Block unmatched inbound traffic and allow outbound traffic' {
-        if (!$tcpReady -or !$udpReady) {
-            throw 'Required AD allow rules were skipped or failed. Default policy was not changed; review existing rules manually.'
+        if (!$tcpReady -or !$udpReady -or !$scoredRulesReady -or !$icmpReady) {
+            throw 'Required AD, scoring, or ICMP allow rules were skipped or failed. Default policy was not changed; review existing rules manually.'
         }
-        Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultInboundAction Block -DefaultOutboundAction Allow
+        Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultInboundAction Block -DefaultOutboundAction Allow -ErrorAction Stop
     } | Out-Null
     Invoke-Step 'Enable firewall allowed/blocked traffic logging (32 MB per profile)' {
-        Set-NetFirewallProfile -Profile Domain,Private,Public -LogBlocked True -LogAllowed True -LogMaxSizeKilobytes 32767
+        Set-NetFirewallProfile -Profile Domain,Private,Public -LogBlocked True -LogAllowed True -LogMaxSizeKilobytes 32767 -ErrorAction Stop
     } | Out-Null
-    Export-Evidence 'Connections' { Get-NetTCPConnection | Select-Object State,LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess }
+    Export-Evidence 'Connections' {
+        try { Get-NetTCPConnection -ErrorAction Stop | Select-Object State,LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess }
+        catch {
+            Write-Warning "CIM connection query failed: $($_.Exception.Message) Exporting native netstat output instead."
+            Invoke-Native "$env:SystemRoot\System32\netstat.exe" @('-ano')
+        }
+    }
 
     Write-Host "`n4. Audit and logging" -ForegroundColor Cyan
     Set-RegistryDword 'Use advanced audit subcategories instead of legacy audit policy' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'SCENoApplyLegacyAuditPolicy' 1
@@ -964,7 +1003,7 @@ if ($Mode -ne 'Audit') {
             throw 'Defender real-time protection is not active after the request. Review applied policy, tamper protection, and antivirus/service configuration; no protection controls were bypassed.'
         }
     } | Out-Null
-    Invoke-Step 'Update Microsoft Defender signatures (if no Internet, type n to skip; an internal update source also works)' { Update-MpSignature } | Out-Null
+    Invoke-Step 'Update Microsoft Defender signatures (if no Internet, type n to skip; an internal update source also works)' { Update-MpSignature -ErrorAction Stop } | Out-Null
     Write-Host "`n5. AD hardening and triage" -ForegroundColor Cyan
     Set-RegistryDword 'Require NTLMv2 and refuse LM/NTLMv1' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LmCompatibilityLevel' 5
     Set-RegistryDword 'Disable WDigest plaintext credential caching (verify after new logons/restart; no automatic restart)' 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0
@@ -982,10 +1021,10 @@ if ($Mode -ne 'Audit') {
 Export-Evidence 'ServiceControlManagerSecurity' { Get-ScManagerSddl }
 Export-Evidence 'Accounts' { Get-ADUser -Filter * -Properties Enabled,LockedOut,MemberOf,PrimaryGroupID,LastLogonDate,Description,ServicePrincipalName,PasswordLastSet -Server $adServer }
 Export-Evidence 'PasswordPolicy' { Get-ADDefaultDomainPasswordPolicy -Server $adServer }
-Export-Evidence 'Services-After' { Get-CimInstance Win32_Service | Select-Object Name,State,StartMode,StartName,PathName }
-Export-Evidence 'ListeningPorts' { Get-NetTCPConnection -State Listen | Select-Object LocalPort,OwningProcess | Sort-Object LocalPort }
-Export-Evidence 'Processes' { Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine }
-Export-Evidence 'Tasks' { Get-ScheduledTask | Select-Object TaskPath,TaskName,State,Actions,Principal,Triggers }
+Export-Evidence 'Services-After' { Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name,State,StartMode,StartName,PathName }
+Export-Evidence 'ListeningPorts' { Get-NetTCPConnection -State Listen -ErrorAction Stop | Select-Object LocalPort,OwningProcess | Sort-Object LocalPort }
+Export-Evidence 'Processes' { Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine }
+Export-Evidence 'Tasks' { Get-ScheduledTask -ErrorAction Stop | Select-Object TaskPath,TaskName,State,Actions,Principal,Triggers }
 Export-Evidence 'StartupRegistry' {
     foreach ($path in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
         'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
@@ -994,7 +1033,7 @@ Export-Evidence 'StartupRegistry' {
     }
 }
 Export-Evidence 'WMI-Persistence' {
-    foreach ($class in '__EventFilter','__EventConsumer','__FilterToConsumerBinding') { Get-CimInstance -Namespace root/subscription -ClassName $class }
+    foreach ($class in '__EventFilter','__EventConsumer','__FilterToConsumerBinding') { Get-CimInstance -Namespace root/subscription -ClassName $class -ErrorAction Stop }
 }
 Export-Evidence 'AccessibilityBinaries' {
     foreach ($name in 'sethc.exe','utilman.exe','narrator.exe','osk.exe','magnify.exe') {
@@ -1029,7 +1068,7 @@ Export-Evidence 'RecentEvents' {
         $events | Select-Object TimeCreated,Id,LogName,Message
     }
 }
-Export-Evidence 'DefenderStatus' { Get-MpComputerStatus }
+Export-Evidence 'DefenderStatus' { Get-MpComputerStatus -ErrorAction Stop }
 Invoke-Step 'Review AD CS and KRBTGT recovery requirements manually' {
     Write-Host 'Review CA/template permissions and requests. Coordinate KRBTGT resets with replication and maximum ticket lifetime (normally 10 hours). No KRBTGT password is changed here.'
 } | Out-Null
