@@ -12,6 +12,7 @@ param(
     [string[]]$DisableUser = @(),
     [string]$RecoveryAdminName,
     [string]$SystemStateBackupTarget,
+    [switch]$RotateKrbtgtOnce,
     [string]$ReportRoot = "$env:ProgramData\CCDC\ServerAD"
 )
 
@@ -20,6 +21,10 @@ $script:RunContext = $PSCmdlet
 $script:Results = New-Object 'System.Collections.Generic.List[object]'
 $script:CanWriteReport = $false
 $script:CreatedRecovery = $null
+$script:FirewallServicesReady = $false
+$script:SystemStateBackupVerified = $false
+
+if ($RotateKrbtgtOnce -and $Mode -eq 'Audit') { throw 'KRBTGT rotation is unavailable in Audit mode.' }
 
 function Read-StepChoice {
     param([string]$Name)
@@ -357,11 +362,168 @@ function Export-QuotientPassword {
     } | Out-Null
 }
 
+function Get-KrbtgtMinimumWait {
+    param([string]$PolicyText)
+    $inside = $false
+    $values = @{}
+    foreach ($line in ($PolicyText -split '\r?\n')) {
+        if ($line.Trim() -match '^\[(.+)\]$') { $inside = $Matches[1] -eq 'Kerberos Policy'; continue }
+        if ($inside -and $line.Trim() -match '^(MaxTicketAge|MaxServiceAge)\s*=\s*(\d+)\s*$') {
+            if ($values.ContainsKey($Matches[1])) { throw 'Duplicate Kerberos ticket lifetime setting; rotation was not started.' }
+            $values[$Matches[1]] = [double]$Matches[2]
+        }
+    }
+    if (!$values.ContainsKey('MaxTicketAge') -or !$values.ContainsKey('MaxServiceAge') -or $values.MaxTicketAge -le 0 -or $values.MaxServiceAge -le 0) {
+        throw 'Could not verify finite effective user/service ticket lifetimes. KRBTGT rotation requires a reviewed Kerberos policy.'
+    }
+    $seconds = [math]::Max(36000, [math]::Max($values.MaxTicketAge * 3600, $values.MaxServiceAge * 60))
+    return [timespan]::FromSeconds($seconds + 300)
+}
+
+function Get-KrbtgtKeyState {
+    param([string]$Identity, [string]$Server)
+    $account = Get-ADUser -Identity $Identity -Properties pwdLastSet,'msDS-KeyVersionNumber',Enabled -Server $Server -ErrorAction Stop
+    if ($account.SID.Value -notmatch '-502$' -or $account.Enabled) { throw 'KRBTGT identity/state is unexpected; rotation was stopped.' }
+    if ([long]$account.pwdLastSet -le 0 -or [int]$account.'msDS-KeyVersionNumber' -le 0) { throw 'KRBTGT key metadata is unavailable; rotation was stopped.' }
+    [pscustomobject]@{Version=[int]$account.'msDS-KeyVersionNumber';PasswordLastSet=[long]$account.pwdLastSet}
+}
+
+function Assert-KrbtgtReplication {
+    param([string]$Identity, [string]$Server, $Expected)
+    $controllers = @(Get-ADDomainController -Filter * -Server $Server -ErrorAction Stop | Where-Object { !$_.IsReadOnly })
+    if (!$controllers.Count) { throw 'No writable domain controllers were discovered.' }
+    foreach ($controller in $controllers) {
+        $target = $controller.HostName
+        $failures = @(Get-ADReplicationFailure -Target $target -Scope Server -ErrorAction Stop | Where-Object FailureCount -gt 0)
+        if ($failures.Count) { throw "Replication failures exist on $target." }
+        $partners = @(Get-ADReplicationPartnerMetadata -Target $target -Scope Server -PartnerType Inbound -ErrorAction Stop)
+        if ($controllers.Count -gt 1 -and !$partners.Count) { throw "No inbound replication partners could be verified on $target." }
+        if (@($partners | Where-Object LastReplicationResult -ne 0).Count) { throw "An inbound replication check failed on $target." }
+        $actual = Get-KrbtgtKeyState -Identity $Identity -Server $target
+        if ($actual.Version -ne $Expected.Version -or $actual.PasswordLastSet -ne $Expected.PasswordLastSet) {
+            throw "KRBTGT key metadata has not converged on $target, or another reset occurred."
+        }
+    }
+}
+
+function Wait-KrbtgtReplication {
+    param([string]$Identity, [string]$Server, $Expected)
+    $deadline = [datetime]::UtcNow.AddMinutes(10)
+    while ($true) {
+        try { Assert-KrbtgtReplication -Identity $Identity -Server $Server -Expected $Expected; return }
+        catch {
+            if ([datetime]::UtcNow -ge $deadline) { throw "KRBTGT replication was not verified within 10 minutes. No further reset will run. $($_.Exception.Message)" }
+            Write-Warning $_.Exception.Message
+            Start-Sleep -Seconds 30
+        }
+    }
+}
+
+function Reset-KrbtgtKeyOnce {
+    param([string]$Identity, [string]$Server, $Expected)
+    $current = Get-KrbtgtKeyState -Identity $Identity -Server $Server
+    if ($current.Version -ne $Expected.Version -or $current.PasswordLastSet -ne $Expected.PasswordLastSet) {
+        throw 'KRBTGT changed since the last check; no additional reset was performed.'
+    }
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $bytes = New-Object byte[] 64
+    $secret = New-Object securestring
+    try {
+        $random.GetBytes($bytes)
+        $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+        foreach ($byte in $bytes) { $secret.AppendChar($alphabet[[int]$byte -band 63]) }
+        foreach ($character in 'aA1!'.ToCharArray()) { $secret.AppendChar($character) }
+        $secret.MakeReadOnly()
+        Set-ADAccountPassword -Identity $Identity -Reset -NewPassword $secret -Server $Server -Confirm:$false -ErrorAction Stop
+    } finally {
+        [array]::Clear($bytes, 0, $bytes.Length)
+        $secret.Dispose()
+        $random.Dispose()
+    }
+    $actual = Get-KrbtgtKeyState -Identity $Identity -Server $Server
+    if ($actual.Version -ne ($Expected.Version + 1) -or $actual.PasswordLastSet -le $Expected.PasswordLastSet) {
+        throw 'KRBTGT reset was attempted but metadata verification failed. Do not repeat the reset without reviewing its state.'
+    }
+    return $actual
+}
+
+function Invoke-KrbtgtRotation {
+    if (!$script:CanWriteReport -or !$script:SystemStateBackupVerified) {
+        throw 'KRBTGT rotation requires protected reports and a successful system-state backup in this run. Supply -SystemStateBackupTarget and review recovery readiness.'
+    }
+    $localDc = Get-ADDomainController -Identity $env:COMPUTERNAME -Server $adServer -ErrorAction Stop
+    if ($localDc.IsReadOnly -or $localDc.HostName -ine $domain.PDCEmulator) {
+        throw 'Run the optional KRBTGT workflow locally on the writable PDC emulator so its effective ticket policy can be checked.'
+    }
+    $identity = "$($domain.DomainSID.Value)-502"
+    $statePath = Join-Path $report 'krbtgt-rotation.json'
+    $policyPath = Join-Path $report 'kerberos-policy.inf'
+    Invoke-Native "$env:SystemRoot\System32\secedit.exe" @('/export','/mergedpolicy','/cfg',$policyPath,'/areas','SECURITYPOLICY','/quiet') | Out-Host
+    $wait = Get-KrbtgtMinimumWait (Get-Content -LiteralPath $policyPath -Raw -ErrorAction Stop)
+    $before = Get-KrbtgtKeyState -Identity $identity -Server $adServer
+    Assert-KrbtgtReplication -Identity $identity -Server $adServer -Expected $before
+    if (([datetime]::UtcNow - [datetime]::FromFileTimeUtc($before.PasswordLastSet)) -lt $wait) {
+        throw 'KRBTGT was changed too recently. No reset was performed; inspect prior rotation records before retrying.'
+    }
+    $state = [ordered]@{Domain=$domain.DNSRoot;Server=$adServer;Phase='ResetPending';Before=$before;After=$null}
+    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8 -ErrorAction Stop
+    Write-Warning 'KRBTGT rotation is starting. Notify the AD/Windows, SQL, application and scoring operators. User/service passwords do not change; authentication may require recovery if dependencies or replication are unhealthy.'
+    $after = Reset-KrbtgtKeyOnce -Identity $identity -Server $adServer -Expected $before
+    $state.After = $after
+    $state.Phase = 'ResetApplied'
+    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8 -ErrorAction Stop
+    Wait-KrbtgtReplication -Identity $identity -Server $adServer -Expected $after
+    $state.Phase = 'Completed'
+    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8 -ErrorAction Stop
+    Write-Host 'One KRBTGT reset replicated; no second reset is scheduled. Verify domain sign-in, DNS, SYSVOL, SQL, authenticated WinRM and Quotient scores. No passwords need to be submitted to Quotient for krbtgt.'
+}
+
+function Get-DefenderRuntimeStatus {
+    try { return Get-MpComputerStatus -ErrorAction Stop }
+    catch {
+        $providerError = $_.Exception.Message
+        $serviceState = 'unavailable'
+        try { $serviceState = [string](Get-Service -Name WinDefend -ErrorAction Stop).Status } catch {}
+        throw "Defender status could not be read through its CIM provider: $providerError WinDefend service: $serviceState. Protection state is unverified; internet access does not fix this management error."
+    }
+}
+
+function Get-DefenderCommandPath {
+    $platformRoot = Join-Path $env:ProgramData 'Microsoft\Windows Defender\Platform'
+    if (Test-Path -LiteralPath $platformRoot -ErrorAction Stop) {
+        $versions = @(Get-ChildItem -LiteralPath $platformRoot -Directory -ErrorAction Stop | Where-Object Name -match '^\d+\.\d+\.\d+\.\d+(?:-|$)' |
+            Sort-Object { [version](($_.Name -split '-')[0]) } -Descending)
+        foreach ($directory in $versions) {
+            $candidate = Join-Path $directory.FullName 'MpCmdRun.exe'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction Stop) { return $candidate }
+        }
+    }
+    $programFilesRoot = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+    $candidate = Join-Path $programFilesRoot 'Windows Defender\MpCmdRun.exe'
+    if (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction Stop) { return $candidate }
+    throw 'MpCmdRun.exe was not found in the Defender platform or Program Files directory. Verify that Defender Antivirus is installed.'
+}
+
+function Update-DefenderSignatures {
+    $providerError = 'Update-MpSignature is unavailable.'
+    if (Get-Command Update-MpSignature -ErrorAction SilentlyContinue) {
+        try {
+            Update-MpSignature -ErrorAction Stop
+            return
+        } catch { $providerError = $_.Exception.Message }
+    }
+    Write-Warning "Defender PowerShell update failed: $providerError Trying the native signature updater."
+    $commandPath = Get-DefenderCommandPath
+    Write-Host "Running $commandPath -SignatureUpdate"
+    Invoke-Native $commandPath @('-SignatureUpdate')
+    Write-Host 'Native signature update command succeeded. This does not enable or verify real-time protection or ASR rules.'
+}
+
 function Enable-LsassAsrRule {
     foreach ($command in 'Get-MpComputerStatus','Get-MpPreference','Add-MpPreference') {
         if (!(Get-Command $command -ErrorAction SilentlyContinue)) { throw "Required Defender command is unavailable: $command" }
     }
-    $status = Get-MpComputerStatus -ErrorAction Stop
+    $status = Get-DefenderRuntimeStatus
     if ($status.AMRunningMode -match 'Passive|EDR Block' -or !$status.AntivirusEnabled -or !$status.RealTimeProtectionEnabled) {
         throw 'ASR requires active Defender Antivirus and real-time protection. Verify the primary antivirus configuration.'
     }
@@ -414,31 +576,113 @@ function Set-RegistryDword {
     } | Out-Null
 }
 
+function Start-FirewallServices {
+    foreach ($serviceName in 'BFE','MpsSvc') {
+        $service = Get-Service -Name $serviceName -ErrorAction Stop
+        if ($service.Status -ne 'Running') {
+            Set-Service -Name $serviceName -StartupType Automatic -ErrorAction Stop
+            Start-Service -Name $serviceName -ErrorAction Stop
+            $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [timespan]::FromSeconds(15))
+        }
+        if ((Get-Service -Name $serviceName -ErrorAction Stop).Status -ne 'Running') {
+            throw "Required firewall service $serviceName is not running."
+        }
+    }
+}
+
+function Get-NativeFirewallPolicy {
+    if (!$script:FirewallServicesReady) { throw 'Firewall service startup was skipped or failed; no firewall configuration was attempted.' }
+    $policy = New-Object -ComObject HNetCfg.FwPolicy2 -ErrorAction Stop
+    if ([int]$policy.LocalPolicyModifyState -ne 0) {
+        throw "Local firewall rules cannot take effect (policy modify state $($policy.LocalPolicyModifyState)). Review Group Policy or block-all-inbound settings."
+    }
+    return $policy
+}
+
+function Set-NativeFirewallAllowRule {
+    param([string]$RuleName, [ValidateSet('TCP','UDP','ICMPv4')][string]$Protocol, [string[]]$Port, [string[]]$Address=@('Any'))
+    $policy = Get-NativeFirewallPolicy
+    $protocolNumber = @{TCP=6;UDP=17;ICMPv4=1}[$Protocol]
+    $remoteAddresses = if ($Address -contains 'Any' -or $Address -contains '*') { '*' } else { $Address -join ',' }
+    $existing = @($policy.Rules | Where-Object Name -eq $RuleName)
+    if ($existing.Count -gt 1) { throw "Multiple firewall rules are named $RuleName; review them before changing policy." }
+    if ($existing.Count) {
+        $rule = $existing[0]
+        if ([int]$rule.Protocol -ne $protocolNumber) { throw "Existing rule $RuleName has a different protocol; review it manually." }
+    } else {
+        $rule = New-Object -ComObject HNetCfg.FWRule -ErrorAction Stop
+        $rule.Name = $RuleName
+        $rule.Protocol = $protocolNumber
+    }
+    $rule.Description = 'CCDC domain controller inbound service access'
+    $rule.Grouping = 'CCDC Server AD'
+    $rule.LocalAddresses = '*'
+    $rule.RemoteAddresses = $remoteAddresses
+    $rule.InterfaceTypes = 'All'
+    $rule.ApplicationName = ''
+    $rule.ServiceName = ''
+    if ($Protocol -eq 'ICMPv4') { $rule.IcmpTypesAndCodes = '8:*' }
+    else {
+        $rule.LocalPorts = $Port -join ','
+        $rule.RemotePorts = '*'
+    }
+    $rule.Profiles = 2147483647
+    $rule.Direction = 1
+    $rule.Action = 1
+    $rule.Enabled = $true
+    if (!$existing.Count) { $policy.Rules.Add($rule) }
+    $verified = $policy.Rules.Item($RuleName)
+    if (!$verified.Enabled -or [int]$verified.Direction -ne 1 -or [int]$verified.Action -ne 1 -or
+        [int]$verified.Protocol -ne $protocolNumber -or [int]$verified.Profiles -ne 2147483647 -or
+        [string]$verified.LocalAddresses -ne '*' -or [string]$verified.InterfaceTypes -ne 'All' -or
+        $verified.ApplicationName -or $verified.ServiceName -or
+        (([string]$verified.RemoteAddresses -split ',' | Sort-Object) -join ',') -ne (($remoteAddresses -split ',' | Sort-Object) -join ',')) {
+        throw "Native firewall rule $RuleName failed readback verification."
+    }
+    if ($Protocol -eq 'ICMPv4') {
+        if ([string]$verified.IcmpTypesAndCodes -ne '8:*') { throw "ICMP rule $RuleName did not read back as echo-request access." }
+    } elseif ((([string]$verified.LocalPorts -split ',' | Sort-Object) -join ',') -ne (($Port | Sort-Object) -join ',') -or [string]$verified.RemotePorts -ne '*') {
+        throw "Native firewall rule $RuleName port readback did not match."
+    }
+}
+
 function Set-AllowRule {
     param([string]$Name, [string]$Protocol, [string[]]$Port, [string[]]$Address)
     $ruleName = "CCDC-AD-$Name"
     return (Invoke-Step "Allow $Protocol ports $($Port -join ',') from $($Address -join ',') [$ruleName]" {
-        $existing = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object Name -eq $ruleName)
-        if ($existing) {
-            $existing | Set-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -Profile Any -ErrorAction Stop
-            $existing | Get-NetFirewallPortFilter -ErrorAction Stop | Set-NetFirewallPortFilter -Protocol $Protocol -LocalPort $Port -ErrorAction Stop
-            $existing | Get-NetFirewallAddressFilter -ErrorAction Stop | Set-NetFirewallAddressFilter -RemoteAddress $Address -ErrorAction Stop
-        } else {
-            New-NetFirewallRule -Name $ruleName -DisplayName $ruleName -Group 'CCDC Server AD' `
-                -Enabled True -Direction Inbound -Action Allow -Profile Any -Protocol $Protocol `
-                -LocalPort $Port -RemoteAddress $Address -ErrorAction Stop | Out-Null
-        }
-        $verified = @(Get-NetFirewallRule -Name $ruleName -PolicyStore PersistentStore -ErrorAction Stop)
-        if ($verified.Count -ne 1 -or [string]$verified[0].Enabled -ne 'True' -or [string]$verified[0].Direction -ne 'Inbound' -or [string]$verified[0].Action -ne 'Allow') {
-            throw "Firewall rule $ruleName did not read back as an enabled inbound allow rule."
-        }
-        $portFilter = $verified[0] | Get-NetFirewallPortFilter -ErrorAction Stop
-        $addressFilter = $verified[0] | Get-NetFirewallAddressFilter -ErrorAction Stop
-        if ([string]$portFilter.Protocol -ne $Protocol -or ((@($portFilter.LocalPort) | Sort-Object) -join ',') -ne (($Port | Sort-Object) -join ',') -or
-            ((@($addressFilter.RemoteAddress) | Sort-Object) -join ',') -ne (($Address | Sort-Object) -join ',')) {
-            throw "Firewall rule $ruleName port/address readback did not match the requested settings."
-        }
+        Set-NativeFirewallAllowRule -RuleName $ruleName -Protocol $Protocol -Port $Port -Address $Address
     })
+}
+
+function Set-NativeFirewallProfiles {
+    param([ValidateSet('Enabled','DefaultPolicy','Logging')][string]$Setting)
+    $policy = Get-NativeFirewallPolicy
+    $netsh = "$env:SystemRoot\System32\netsh.exe"
+    switch ($Setting) {
+        Enabled {
+            foreach ($profile in 1,2,4) {
+                if ($policy.BlockAllInboundTraffic($profile)) { throw "Firewall profile $profile blocks all inbound exceptions; review policy before enabling enforcement." }
+            }
+            Invoke-Native $netsh @('advfirewall','set','allprofiles','state','on')
+            foreach ($profile in 1,2,4) {
+                if (!$policy.FirewallEnabled($profile)) { throw "Firewall profile $profile did not read back as enabled." }
+            }
+        }
+        DefaultPolicy {
+            Invoke-Native $netsh @('advfirewall','set','allprofiles','firewallpolicy','blockinbound,allowoutbound')
+            foreach ($profile in 1,2,4) {
+                if ([int]$policy.DefaultInboundAction($profile) -ne 0 -or [int]$policy.DefaultOutboundAction($profile) -ne 1) {
+                    throw "Firewall profile $profile default-policy readback did not match."
+                }
+            }
+        }
+        Logging {
+            Invoke-Native $netsh @('advfirewall','set','allprofiles','logging','allowedconnections','enable')
+            Invoke-Native $netsh @('advfirewall','set','allprofiles','logging','droppedconnections','enable')
+            Invoke-Native $netsh @('advfirewall','set','allprofiles','logging','maxfilesize','32767')
+            Invoke-Native $netsh @('advfirewall','show','allprofiles','logging')
+        }
+    }
 }
 
 function Export-Evidence {
@@ -654,7 +898,10 @@ function Invoke-ServiceBaselineBackups {
             Backup-GPO -All -Path $directory -Server $env:COMPUTERNAME -ErrorAction Stop | Export-Clixml -LiteralPath (Join-Path $OutputDirectory 'AD-GPO-backups.xml') -Depth 8
         }
         if ($SystemStateBackupTarget) {
-            Invoke-BaselineBackup "AD system state to $SystemStateBackupTarget (potentially lengthy; requires Windows Server Backup)" 'System-state backup' { Backup-BaselineSystemState $SystemStateBackupTarget }
+            Invoke-BaselineBackup "AD system state to $SystemStateBackupTarget (potentially lengthy; requires Windows Server Backup)" 'System-state backup' {
+                Backup-BaselineSystemState $SystemStateBackupTarget
+                $script:SystemStateBackupVerified = $true
+            }
         } else {
             $script:BaselineResults.Add([pscustomobject]@{Name='AD system state';Kind='System-state backup';Status='ManualRequired';Detail='No destination supplied. Rerun with -SystemStateBackupTarget E: or a dedicated UNC share. GPO/configuration exports do not back up AD DS.'})
         }
@@ -729,7 +976,6 @@ function Assert-LocalDomainController {
 
 Import-Module ActiveDirectory -ErrorAction Stop
 Assert-LocalDomainController
-Import-Module NetSecurity -ErrorAction Stop
 $adServer = $env:COMPUTERNAME
 $domain = Get-ADDomain -Server $adServer
 $administrator = Get-ADUser -Identity "$($domain.DomainSID.Value)-500" -Server $adServer
@@ -919,6 +1165,10 @@ if ($Mode -ne 'Audit') {
     } | Out-Null
 
     Write-Host "`n3. Firewall and connections" -ForegroundColor Cyan
+    Write-Host 'Firewall backend: native Windows Firewall COM API and netsh; firewall configuration does not use CIM.'
+    $script:FirewallServicesReady = Invoke-Step 'Start BFE and Windows Defender Firewall services (existing firewall policy takes effect)' {
+        Start-FirewallServices
+    }
     $tcpReady = Set-AllowRule 'Domain-TCP' TCP @('53','88','135','389','445','464','636','3268','3269','49152-65535') $DomainClientAddress
     $udpReady = Set-AllowRule 'Domain-UDP' UDP @('53','88','123','389','464') $DomainClientAddress
     $scoredRulesReady = $true
@@ -929,29 +1179,22 @@ if ($Mode -ne 'Audit') {
         if (!(Set-AllowRule "Scored-UDP-$port" UDP @("$port") @('Any'))) { $scoredRulesReady = $false }
     }
     $icmpReady = Invoke-Step 'Allow inbound ICMPv4 echo requests for reachability/scoring checks' {
-        $icmpRule = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object Name -eq 'CCDC-AD-ICMP')
-        if ($icmpRule.Count) {
-            $icmpRule | Set-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -Profile Any -ErrorAction Stop
-            $icmpRule | Get-NetFirewallPortFilter -ErrorAction Stop | Set-NetFirewallPortFilter -Protocol ICMPv4 -IcmpType 8 -ErrorAction Stop
-            $icmpRule | Get-NetFirewallAddressFilter -ErrorAction Stop | Set-NetFirewallAddressFilter -RemoteAddress Any -ErrorAction Stop
-        } else {
-            New-NetFirewallRule -Name CCDC-AD-ICMP -DisplayName CCDC-AD-ICMP -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -Profile Any -ErrorAction Stop | Out-Null
-        }
+        Set-NativeFirewallAllowRule -RuleName CCDC-AD-ICMP -Protocol ICMPv4 -Address @('Any')
     }
     Invoke-Step 'Enable Windows Firewall on all profiles after preparing AD allow rules' {
         if (!$tcpReady -or !$udpReady -or !$scoredRulesReady -or !$icmpReady) {
             throw 'Required AD, scoring, or ICMP allow rules were skipped or failed. Firewall activation was not changed; review existing rules manually.'
         }
-        Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -ErrorAction Stop
+        Set-NativeFirewallProfiles -Setting Enabled
     } | Out-Null
     Invoke-Step 'Block unmatched inbound traffic and allow outbound traffic' {
         if (!$tcpReady -or !$udpReady -or !$scoredRulesReady -or !$icmpReady) {
             throw 'Required AD, scoring, or ICMP allow rules were skipped or failed. Default policy was not changed; review existing rules manually.'
         }
-        Set-NetFirewallProfile -Profile Domain,Private,Public -DefaultInboundAction Block -DefaultOutboundAction Allow -ErrorAction Stop
+        Set-NativeFirewallProfiles -Setting DefaultPolicy
     } | Out-Null
     Invoke-Step 'Enable firewall allowed/blocked traffic logging (32 MB per profile)' {
-        Set-NetFirewallProfile -Profile Domain,Private,Public -LogBlocked True -LogAllowed True -LogMaxSizeKilobytes 32767 -ErrorAction Stop
+        Set-NativeFirewallProfiles -Setting Logging
     } | Out-Null
     Export-Evidence 'Connections' {
         try { Get-NetTCPConnection -ErrorAction Stop | Select-Object State,LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess }
@@ -989,7 +1232,7 @@ if ($Mode -ne 'Audit') {
                 throw 'Defender commands are unavailable. Verify protection in the installed antivirus product or install/configure Defender separately.'
             }
         }
-        $before = Get-MpComputerStatus -ErrorAction Stop
+        $before = Get-DefenderRuntimeStatus
         if ($before.AMRunningMode -match 'Passive|EDR Block') {
             throw "Defender is in $($before.AMRunningMode) mode. Verify real-time protection in the primary antivirus product; active mode was not forced."
         }
@@ -997,13 +1240,13 @@ if ($Mode -ne 'Audit') {
             throw 'Defender antivirus service is not running. Review service status and applied policy, then retry.'
         }
         Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop
-        $status = Get-MpComputerStatus -ErrorAction Stop
+        $status = Get-DefenderRuntimeStatus
         $status | Select-Object AMRunningMode,AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled
         if (!$status.AMServiceEnabled -or !$status.AntivirusEnabled -or !$status.RealTimeProtectionEnabled) {
             throw 'Defender real-time protection is not active after the request. Review applied policy, tamper protection, and antivirus/service configuration; no protection controls were bypassed.'
         }
     } | Out-Null
-    Invoke-Step 'Update Microsoft Defender signatures (if no Internet, type n to skip; an internal update source also works)' { Update-MpSignature -ErrorAction Stop } | Out-Null
+    Invoke-Step 'Update Microsoft Defender signatures (uses native MpCmdRun if the PowerShell update fails)' { Update-DefenderSignatures } | Out-Null
     Write-Host "`n5. AD hardening and triage" -ForegroundColor Cyan
     Set-RegistryDword 'Require NTLMv2 and refuse LM/NTLMv1' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LmCompatibilityLevel' 5
     Set-RegistryDword 'Disable WDigest plaintext credential caching (verify after new logons/restart; no automatic restart)' 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0
@@ -1068,13 +1311,18 @@ Export-Evidence 'RecentEvents' {
         $events | Select-Object TimeCreated,Id,LogName,Message
     }
 }
-Export-Evidence 'DefenderStatus' { Get-MpComputerStatus -ErrorAction Stop }
+Export-Evidence 'DefenderStatus' { Get-DefenderRuntimeStatus }
 Invoke-Step 'Review AD CS and KRBTGT recovery requirements manually' {
-    Write-Host 'Review CA/template permissions and requests. Coordinate KRBTGT resets with replication and maximum ticket lifetime (normally 10 hours). No KRBTGT password is changed here.'
+    Write-Host 'Review CA/template permissions and requests. Optional -RotateKrbtgtOnce offers one guarded reset after checking backup, replication and time since any prior reset. Without that switch, KRBTGT is unchanged.'
 } | Out-Null
 Invoke-Step 'Review incident-response follow-up manually' {
     Write-Host 'Test DNS, Kerberos, LDAP, SYSVOL, replication, console access and scoring. Use Sysinternals/external scans. Review evidence before killing processes or deleting tasks/services/registry entries. Record incidents. No automatic reboot.'
 } | Out-Null
+if ($RotateKrbtgtOnce) {
+    Invoke-Step 'Rotate KRBTGT ONCE with healthy replication and a verified system-state backup (no second reset is scheduled)' {
+        Invoke-KrbtgtRotation
+    } | Out-Null
+}
 if ($script:CanWriteReport) {
     Invoke-Step 'Export domain GPO report' {
         Import-Module GroupPolicy
@@ -1086,4 +1334,10 @@ if ($script:CanWriteReport) {
     Write-Host "Report directory: $report"
 }
 $script:Results | Format-Table -AutoSize
-if (@($script:Results | Where-Object Status -eq 'Failed').Count) { throw 'Some actions failed. Review the summary; the plan is not fully complete.' }
+$failedSteps = @($script:Results | Where-Object Status -eq 'Failed')
+if ($failedSteps.Count) {
+    Write-Warning "Walkthrough ended with $($failedSteps.Count) failed step(s). Earlier successful changes remain applied; review the failed steps and report before retrying."
+    $failedSteps | Select-Object Step,Error | Format-Table -Wrap -AutoSize
+    exit 1
+}
+Write-Host 'Walkthrough finished with no recorded failures. Review skipped actions, backup gaps and live scoring before declaring the host ready.'
