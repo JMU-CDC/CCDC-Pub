@@ -52,8 +52,26 @@ function Invoke-Step {
     }
     $script:Results.Add([pscustomobject]@{ Step=$Name; Status=$status; Error=$errorText })
     if ($status -eq 'Failed') { Write-Warning "$Name FAILED: $errorText. Review this before running the next action." }
+    elseif ($errorText) { Write-Host "[$status] $Name ($errorText)" }
     else { Write-Host "[$status] $Name" }
     return ($status -eq 'Completed')
+}
+
+function Get-SmbStepConfiguration {
+    param([ValidateSet('Server','Client')][string]$Side)
+    $serviceName = if ($Side -eq 'Server') { 'LanmanServer' } else { 'LanmanWorkstation' }
+    foreach ($command in @("Get-Smb${Side}Configuration", "Set-Smb${Side}Configuration")) {
+        if (!(Get-Command -Name $command -ErrorAction SilentlyContinue)) {
+            throw [System.OperationCanceledException]::new("SMB $Side command is unavailable: $command")
+        }
+    }
+    $service = @(Get-Service -ErrorAction Stop | Where-Object Name -eq $serviceName)
+    if (!$service.Count) {
+        throw [System.OperationCanceledException]::new("SMB $Side component is not installed ($serviceName is absent).")
+    }
+    $configuration = & "Get-Smb${Side}Configuration" -ErrorAction Stop
+    if ($null -eq $configuration) { throw "SMB $Side configuration could not be read." }
+    return $configuration
 }
 
 function Invoke-Native {
@@ -476,15 +494,8 @@ function Invoke-BaselineBackup {
     if ($DiscoveryOnly -or !$script:BaselineCanWrite) { $state='NotAttempted'; $detail='Discovery only or no report directory; no backup attempted.' }
     elseif ($script:BaselineContext.ShouldProcess($Name,'Create service backup')) {
         Write-Host "`nBACKUP: $Name [$Kind]" -ForegroundColor Cyan
-        while ($true) {
-            $answer = Read-Host 'Press Enter to back up, or n then Enter to skip'
-            if ($null -eq $answer) { throw 'Interactive input is unavailable.' }
-            if ($answer -eq '' -or $answer.Trim() -ieq 'n') { break }
-        }
-        if ($answer -eq '') {
-            try { & $Action | Out-Host; $state='Completed' }
-            catch { $state='Failed'; $detail=$_.Exception.Message; Write-Warning "$Name failed: $detail" }
-        }
+        try { & $Action | Out-Host; $state='Completed' }
+        catch { $state='Failed'; $detail=$_.Exception.Message; Write-Warning "$Name failed: $detail" }
     } else { $state='Preview' }
     $script:BaselineResults.Add([pscustomobject]@{Name=$Name;Kind=$Kind;Status=$state;Detail=$detail})
 }
@@ -682,7 +693,7 @@ $script:CanWriteReport = Invoke-Step "Create protected report directory: $report
     }
     Set-Acl -LiteralPath $report -AclObject $acl
 }
-Invoke-Step 'Back up discovered services BEFORE password or hardening changes (each backup has its own Enter/n prompt)' {
+Invoke-Step 'Back up ALL discovered services BEFORE password or hardening changes (one approval runs all supported backups)' {
     if ($null -eq $script:InitialServiceInventory) { throw 'Service discovery was skipped or failed. Rerun discovery before attempting service backups.' }
     $options = @{ Inventory=$script:InitialServiceInventory; OutputDirectory=(Join-Path $report 'ServiceBaseline'); DiscoveryOnly=($Mode -eq 'Audit'); NoReport=(!$script:CanWriteReport) }
     if ($SystemStateBackupTarget) { $options.SystemStateBackupTarget=$SystemStateBackupTarget }
@@ -766,16 +777,46 @@ if ($Mode -ne 'Audit') {
             Write-Host 'Saved for the next sign-in/restart; the active desktop may retain its cached setting. Verify five-Shift behavior afterward. Accessibility binaries and debugger redirects are not modified.'
         } | Out-Null
     }
-    Invoke-Step 'Disable SMBv1 on the SMB server' { Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force } | Out-Null
-    Invoke-Step 'Require SMB SERVER signing' { Set-SmbServerConfiguration -RequireSecuritySignature $true -Force } | Out-Null
-    Invoke-Step 'Require SMB CLIENT signing' { Set-SmbClientConfiguration -RequireSecuritySignature $true -Force } | Out-Null
+    Invoke-Step 'Disable SMBv1 on the SMB server' {
+        $configuration = Get-SmbStepConfiguration -Side Server
+        if ($configuration.EnableSMB1Protocol -eq $false) {
+            throw [System.OperationCanceledException]::new('SMBv1 is already disabled; no change is needed.')
+        }
+        Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop
+        if ((Get-SmbServerConfiguration -ErrorAction Stop).EnableSMB1Protocol -ne $false) {
+            throw 'SMBv1 server setting did not read back as disabled.'
+        }
+    } | Out-Null
+    Invoke-Step 'Require SMB SERVER signing' {
+        $configuration = Get-SmbStepConfiguration -Side Server
+        if ($configuration.RequireSecuritySignature -eq $true) { return }
+        Set-SmbServerConfiguration -RequireSecuritySignature $true -Force -ErrorAction Stop
+        if ((Get-SmbServerConfiguration -ErrorAction Stop).RequireSecuritySignature -ne $true) {
+            throw 'SMB server signing requirement did not read back as enabled.'
+        }
+    } | Out-Null
+    Invoke-Step 'Require SMB CLIENT signing' {
+        $configuration = Get-SmbStepConfiguration -Side Client
+        if ($configuration.RequireSecuritySignature -eq $true) { return }
+        Set-SmbClientConfiguration -RequireSecuritySignature $true -Force -ErrorAction Stop
+        if ((Get-SmbClientConfiguration -ErrorAction Stop).RequireSecuritySignature -ne $true) {
+            throw 'SMB client signing requirement did not read back as enabled.'
+        }
+    } | Out-Null
     Invoke-Step 'Restrict network-logon access to Service Control Manager (PsExec-style service creation; also blocks legitimate remote service management; requires protected backup directory)' {
         Protect-ScManagerNetworkAccess
     } | Out-Null
     Set-RegistryDword 'Disable LLMNR' 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast' 0
-    foreach ($nic in Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True') {
+    $script:NetBiosAdapters = @()
+    $netBiosDiscoveryReady = Invoke-Step 'Discover IP-enabled adapters before changing NetBIOS (CIM failure skips NetBIOS changes)' {
+        $script:NetBiosAdapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop)
+    }
+    if (!$netBiosDiscoveryReady) {
+        Write-Warning 'Adapter discovery was skipped or failed. NetBIOS settings were not changed; review CIM/WMI health before retrying.'
+    }
+    foreach ($nic in $script:NetBiosAdapters) {
         Invoke-Step "Disable NetBIOS over TCP/IP on adapter: $($nic.Description)" {
-            $outcome = Invoke-CimMethod -InputObject $nic -MethodName SetTcpipNetbios -Arguments @{TcpipNetbiosOptions=[uint32]2}
+            $outcome = Invoke-CimMethod -InputObject $nic -MethodName SetTcpipNetbios -Arguments @{TcpipNetbiosOptions=[uint32]2} -ErrorAction Stop
             if ($outcome.ReturnValue -notin 0,1) { throw "NetBIOS change failed: $($outcome.ReturnValue)" }
             if ($outcome.ReturnValue -eq 1) { Write-Warning 'NetBIOS change needs a restart.' }
         } | Out-Null
