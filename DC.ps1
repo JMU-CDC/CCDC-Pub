@@ -435,9 +435,39 @@ function Invoke-BaselineNative {
 }
 
 function Get-ServiceBaseline {
-    $services = @(Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name,DisplayName,State,StartMode,StartName,PathName,ProcessId)
-    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine)
     $issues = New-Object 'System.Collections.Generic.List[object]'
+    $services = @()
+    $processes = @()
+    try {
+        $services = @(Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name,DisplayName,State,StartMode,StartName,PathName,ProcessId)
+    } catch {
+        $issues.Add([pscustomobject]@{Source='Service CIM fallback';Status='ManualRequired';Error="CIM failed: $($_.Exception.Message) Using Service Control Manager and registry; service process IDs are unavailable."})
+        $startModes = @{0='Boot';1='System';2='Auto';3='Manual';4='Disabled'}
+        $services = @(foreach ($service in (Get-Service -ErrorAction Stop)) {
+            $configuration = $null
+            try {
+                $configuration = Get-ItemProperty -LiteralPath (Join-Path 'HKLM:\SYSTEM\CurrentControlSet\Services' $service.Name) -ErrorAction Stop
+            } catch {
+                $issues.Add([pscustomobject]@{Source="Service registry: $($service.Name)";Status='ManualRequired';Error=$_.Exception.Message})
+            }
+            [pscustomobject]@{
+                Name=$service.Name;DisplayName=$service.DisplayName;State=[string]$service.Status
+                StartMode=$(if ($null -ne $configuration -and $null -ne $configuration.Start) {$startModes[[int]$configuration.Start]} else {$null})
+                StartName=$configuration.ObjectName;PathName=$configuration.ImagePath;ProcessId=$null
+            }
+        })
+        if (!$services.Count) { throw 'CIM service discovery failed and Service Control Manager returned no services. Backups cannot be selected reliably.' }
+    }
+    try {
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine)
+    } catch {
+        $issues.Add([pscustomobject]@{Source='Process CIM fallback';Status='ManualRequired';Error="CIM failed: $($_.Exception.Message) Using Get-Process; parent process IDs and command lines are unavailable."})
+        try {
+            $processes = @(Get-Process -ErrorAction Stop | Select-Object Name,@{Name='ProcessId';Expression={$_.Id}},@{Name='ParentProcessId';Expression={$null}},@{Name='ExecutablePath';Expression={$_.Path}},@{Name='CommandLine';Expression={$null}})
+        } catch {
+            $issues.Add([pscustomobject]@{Source='Process fallback';Error=$_.Exception.Message})
+        }
+    }
     $endpoints = New-Object 'System.Collections.Generic.List[object]'
     $hints = @{21='FTP';22='SSH';25='SMTP';53='DNS';80='HTTP';110='POP3';123='NTP';143='IMAP';389='LDAP';443='HTTPS';445='SMB';636='LDAPS';1433='SQL';3389='RDP';5985='WinRM HTTP';5986='WinRM HTTPS';8000='Possible Splunk web';8089='Possible Splunk management';9997='Possible Splunk receiver'}
     foreach ($protocol in 'TCP','UDP') {
@@ -636,7 +666,8 @@ function Invoke-InitialServiceBackups {
         if ($inventory.IisVdirsXml) { $inventory.IisVdirsXml | Set-Content -LiteralPath (Join-Path $OutputDirectory 'IIS-vdirs.xml') }
     }
     foreach ($issue in $inventory.Issues) {
-        $script:BaselineResults.Add([pscustomobject]@{Name=$issue.Source;Kind='Discovery';Status='Failed';Detail=$issue.Error})
+        $issueStatus = if ($issue.Status) { $issue.Status } else { 'Failed' }
+        $script:BaselineResults.Add([pscustomobject]@{Name=$issue.Source;Kind='Discovery';Status=$issueStatus;Detail=$issue.Error})
         Write-Warning "$($issue.Source): $($issue.Error)"
     }
     Invoke-ServiceBaselineBackups $inventory
