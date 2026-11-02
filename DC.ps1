@@ -8,6 +8,7 @@ param(
     [ValidateRange(1, 65535)][int[]]$ScoredUdpPort = @(53),
     [ValidateRange(0, 999)][Nullable[int]]$LockoutThreshold = $null,
     [switch]$ExportQuotientPasswords,
+    [switch]$Defender,
     [string[]]$ResetUser = @(),
     [string[]]$DisableUser = @(),
     [string]$RecoveryAdminName,
@@ -1198,6 +1199,33 @@ function Assert-LocalDomainController {
     Write-Host 'Local domain controller verified using AD DS and Active Directory; CIM/WMI still needs investigation.'
 }
 
+function Invoke-DefenderOnlyPlan {
+    Write-Host 'Defender-only mode: real-time protection and signature updates; exits without running the AD walkthrough.' -ForegroundColor Cyan
+    if ($Mode -eq 'Audit') {
+        Invoke-Step 'Review Microsoft Defender status (read-only)' { Get-DefenderRuntimeStatus } | Out-Null
+    } else {
+        Invoke-Step 'Enable Microsoft Defender real-time protection and verify active status' {
+            Enable-DefenderRealtimeProtection
+        } | Out-Null
+        Invoke-Step 'Update Microsoft Defender signatures (uses native MpCmdRun if the PowerShell update fails)' {
+            Update-DefenderSignatures
+        } | Out-Null
+    }
+    $script:Results | Format-Table -Wrap -AutoSize | Out-Host
+    $failedSteps = @($script:Results | Where-Object Status -eq 'Failed')
+    if ($failedSteps.Count) {
+        Write-Warning "Defender-only run ended with $($failedSteps.Count) failed step(s). Review the errors above; protection is not verified by a successful signature update alone."
+        return 1
+    }
+    Write-Host 'Defender-only run finished with no recorded failures. Review any skipped or previewed actions.'
+    return 0
+}
+
+if ($Defender) {
+    $defenderExitCode = Invoke-DefenderOnlyPlan
+    exit $defenderExitCode
+}
+
 Import-Module ActiveDirectory -ErrorAction Stop
 Assert-LocalDomainController
 $adServer = $env:COMPUTERNAME
@@ -1431,10 +1459,7 @@ if ($Mode -ne 'Audit') {
     Set-RegistryDword 'Include command lines in process creation events' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled' 1
     Set-RegistryDword 'Enable UAC (may require a later reboot)' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLUA' 1
     Set-RegistryDword 'Require administrator consent on the secure desktop' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin' 2
-    Invoke-Step 'Enable Microsoft Defender real-time protection and verify active status' {
-        Enable-DefenderRealtimeProtection
-    } | Out-Null
-    Invoke-Step 'Update Microsoft Defender signatures (uses native MpCmdRun if the PowerShell update fails)' { Update-DefenderSignatures } | Out-Null
+    Write-Host 'Real-time protection enabling and signature updates run separately: .\DC.ps1 -Defender. The installation check remains in this walkthrough.'
     Write-Host "`n5. AD hardening and triage" -ForegroundColor Cyan
     Set-RegistryDword 'Require NTLMv2 and refuse LM/NTLMv1' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LmCompatibilityLevel' 5
     Set-RegistryDword 'Disable WDigest plaintext credential caching (verify after new logons/restart; no automatic restart)' 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0
@@ -1513,7 +1538,7 @@ if ($Mode -ne 'Audit') {
         if ($installation.RestartNeeded) {
             $script:Results.Add([pscustomobject]@{Step='Defender feature servicing';Status='PendingRestart';Error='Coordinate a reboot, then recheck feature installation, update signatures and verify protection. No automatic reboot was performed.'})
         } elseif ($installation.Outcome -eq 'Installed') {
-            Update-DefenderSignatures
+            Write-Host 'Defender feature installed. Run .\DC.ps1 -Defender separately to enable real-time protection and update signatures when ready.'
         }
     } | Out-Null
 }
