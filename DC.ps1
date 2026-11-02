@@ -38,8 +38,73 @@ function Read-StepChoice {
     }
 }
 
+function Install-TimestampPrompt {
+    param([string]$ProfilePath=$PROFILE.CurrentUserAllHosts)
+    if ([string]::IsNullOrWhiteSpace($ProfilePath)) { throw 'The current-user PowerShell profile path is unavailable.' }
+    $begin = '# BEGIN CCDC TIMESTAMP PROMPT'
+    $end = '# END CCDC TIMESTAMP PROMPT'
+    $block = @'
+# BEGIN CCDC TIMESTAMP PROMPT
+function global:prompt {
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')] | PS $(Get-Location)`n--> "
+}
+$env:PROMPT = '$D$S$T$H$H$H$S$B$S$P$_--$G'
+# END CCDC TIMESTAMP PROMPT
+'@
+    $exists = Test-Path -LiteralPath $ProfilePath -PathType Leaf -ErrorAction Stop
+    $content = ''
+    $encoding = New-Object Text.UTF8Encoding($true)
+    if ($exists) {
+        $reader = New-Object IO.StreamReader($ProfilePath, (New-Object Text.UTF8Encoding($false,$true)), $true)
+        try {
+            try { $content = $reader.ReadToEnd(); $encoding = $reader.CurrentEncoding }
+            catch [Text.DecoderFallbackException] {
+                $reader.Dispose()
+                $reader = New-Object IO.StreamReader($ProfilePath, [Text.Encoding]::Default, $true)
+                $content = $reader.ReadToEnd()
+                $encoding = $reader.CurrentEncoding
+            }
+        } finally { $reader.Dispose() }
+    }
+    $beginMatches = [regex]::Matches($content, '(?m)^' + [regex]::Escape($begin) + '\r?$')
+    $endMatches = [regex]::Matches($content, '(?m)^' + [regex]::Escape($end) + '\r?$')
+    if ($beginMatches.Count -ne $endMatches.Count -or $beginMatches.Count -gt 1) {
+        throw 'Existing timestamp profile markers are incomplete or duplicated; review the profile before changing it.'
+    }
+    if ($beginMatches.Count) {
+        $start = $beginMatches[0].Index
+        $finish = $endMatches[0].Index + $end.Length
+        if ($finish -le $start) { throw 'Existing timestamp profile markers are out of order.' }
+        $updated = $content.Substring(0,$start) + $block + $content.Substring($finish)
+    } else {
+        $separator = if ($content -and !$content.EndsWith("`n")) { [Environment]::NewLine } else { '' }
+        $updated = $content + $separator + $block + [Environment]::NewLine
+    }
+    $profileTokens = $null
+    $profileErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($updated, [ref]$profileTokens, [ref]$profileErrors)
+    if ($profileErrors.Count) { throw 'The resulting PowerShell profile has syntax errors; the profile was not changed.' }
+    if ($updated -cne $content) {
+        $parent = Split-Path -Parent $ProfilePath
+        if (!(Test-Path -LiteralPath $parent -PathType Container -ErrorAction Stop)) {
+            New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+        }
+        if ($exists) {
+            $backup = $ProfilePath + '.ccdc-backup-' + [guid]::NewGuid().ToString('N') + '.bak'
+            Copy-Item -LiteralPath $ProfilePath -Destination $backup -ErrorAction Stop
+            Write-Host "Original profile backed up to $backup"
+        }
+        [IO.File]::WriteAllText($ProfilePath, $updated, $encoding)
+        if ([IO.File]::ReadAllText($ProfilePath,$encoding) -cne $updated) { throw 'PowerShell profile readback did not match.' }
+    }
+    & ([scriptblock]::Create($block))
+    Write-Host "Timestamped prompts enabled now and saved for this user's future Windows PowerShell sessions: $ProfilePath"
+    Write-Host 'Sessions started with -NoProfile or with profile execution blocked will not load this customization. Later host-specific profile code can override the prompt.'
+}
+
 function Invoke-Step {
-    param([Alias('Name')][string]$StepName, [scriptblock]$Action)
+    param([Alias('Name')][string]$StepName, [scriptblock]$Action,
+        [ValidateSet('Completed','PendingRestart')][string]$CompletionStatus='Completed')
     $status = 'Skipped'
     $errorText = ''
     try {
@@ -47,7 +112,7 @@ function Invoke-Step {
             $status = if ($WhatIfPreference) { 'Preview' } else { 'Skipped' }
         } elseif (Read-StepChoice $StepName) {
             & $Action | Out-Host
-            $status = 'Completed'
+            $status = $CompletionStatus
         }
     } catch [System.OperationCanceledException] {
         $errorText = $_.Exception.Message
@@ -62,21 +127,29 @@ function Invoke-Step {
     return ($status -eq 'Completed')
 }
 
-function Get-SmbStepConfiguration {
-    param([ValidateSet('Server','Client')][string]$Side)
-    $serviceName = if ($Side -eq 'Server') { 'LanmanServer' } else { 'LanmanWorkstation' }
-    foreach ($command in @("Get-Smb${Side}Configuration", "Set-Smb${Side}Configuration")) {
-        if (!(Get-Command -Name $command -ErrorAction SilentlyContinue)) {
-            throw [System.OperationCanceledException]::new("SMB $Side command is unavailable: $command")
-        }
+function Set-SmbRegistrySetting {
+    param([ValidateSet('Server','Client')][string]$Side,
+        [ValidateSet('SMB1','RequireSecuritySignature')][string]$SettingName, [int]$Value)
+    if (($SettingName -eq 'SMB1' -and ($Side -ne 'Server' -or $Value -ne 0)) -or
+        ($SettingName -eq 'RequireSecuritySignature' -and $Value -ne 1)) {
+        throw 'Unsupported SMB hardening setting.'
     }
+    $serviceName = if ($Side -eq 'Server') { 'LanmanServer' } else { 'LanmanWorkstation' }
     $service = @(Get-Service -ErrorAction Stop | Where-Object Name -eq $serviceName)
     if (!$service.Count) {
         throw [System.OperationCanceledException]::new("SMB $Side component is not installed ($serviceName is absent).")
     }
-    $configuration = & "Get-Smb${Side}Configuration" -ErrorAction Stop
-    if ($null -eq $configuration) { throw "SMB $Side configuration could not be read." }
-    return $configuration
+    $path = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName\Parameters"
+    try {
+        if (!(Test-Path -LiteralPath $path -ErrorAction Stop)) {
+            New-Item -Path $path -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -LiteralPath $path -Name $SettingName -Value $Value -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        if ((Get-ItemProperty -LiteralPath $path -Name $SettingName -ErrorAction Stop).$SettingName -ne $Value) {
+            throw 'Saved SMB registry value did not match.'
+        }
+    } catch { throw "SMB registry update failed for '${path}\${SettingName}': $($_.Exception.Message)" }
+    Write-Host "Saved and verified ${path}\${SettingName} = $Value. Restart required before treating this as active protection; no service or computer restart was performed."
 }
 
 function Invoke-Native {
@@ -592,58 +665,65 @@ function Start-FirewallServices {
 
 function Get-NativeFirewallPolicy {
     if (!$script:FirewallServicesReady) { throw 'Firewall service startup was skipped or failed; no firewall configuration was attempted.' }
-    $policy = New-Object -ComObject HNetCfg.FwPolicy2 -ErrorAction Stop
-    if ([int]$policy.LocalPolicyModifyState -ne 0) {
-        throw "Local firewall rules cannot take effect (policy modify state $($policy.LocalPolicyModifyState)). Review Group Policy or block-all-inbound settings."
+    try {
+        $policy = New-Object -ComObject HNetCfg.FwPolicy2 -ErrorAction Stop
+        $modifyState = [int]$policy.LocalPolicyModifyState
+    } catch { throw "Cannot read native firewall policy/modification state: $($_.Exception.Message)" }
+    if ($modifyState -ne 0) {
+        throw "Local firewall rules cannot take effect (policy modify state $modifyState). Review Group Policy or block-all-inbound settings."
     }
     return $policy
 }
 
+function Invoke-FirewallNetsh {
+    param([string[]]$Arguments)
+    $ErrorActionPreference = 'Continue'
+    $output = @(& "$env:SystemRoot\System32\netsh.exe" @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "netsh $($Arguments -join ' ') failed (exit $exitCode): $($output -join ' ')"
+    }
+    $output | Out-Host
+}
+
 function Set-NativeFirewallAllowRule {
     param([string]$RuleName, [ValidateSet('TCP','UDP','ICMPv4')][string]$Protocol, [string[]]$Port, [string[]]$Address=@('Any'))
-    $policy = Get-NativeFirewallPolicy
-    $protocolNumber = @{TCP=6;UDP=17;ICMPv4=1}[$Protocol]
-    $remoteAddresses = if ($Address -contains 'Any' -or $Address -contains '*') { '*' } else { $Address -join ',' }
-    $existing = @($policy.Rules | Where-Object Name -eq $RuleName)
-    if ($existing.Count -gt 1) { throw "Multiple firewall rules are named $RuleName; review them before changing policy." }
-    if ($existing.Count) {
-        $rule = $existing[0]
-        if ([int]$rule.Protocol -ne $protocolNumber) { throw "Existing rule $RuleName has a different protocol; review it manually." }
-    } else {
-        $rule = New-Object -ComObject HNetCfg.FWRule -ErrorAction Stop
-        $rule.Name = $RuleName
-        $rule.Protocol = $protocolNumber
-    }
-    $rule.Description = 'CCDC domain controller inbound service access'
-    $rule.Grouping = 'CCDC Server AD'
-    $rule.LocalAddresses = '*'
-    $rule.RemoteAddresses = $remoteAddresses
-    $rule.InterfaceTypes = 'All'
-    $rule.ApplicationName = ''
-    $rule.ServiceName = ''
-    if ($Protocol -eq 'ICMPv4') { $rule.IcmpTypesAndCodes = '8:*' }
-    else {
-        $rule.LocalPorts = $Port -join ','
-        $rule.RemotePorts = '*'
-    }
-    $rule.Profiles = 2147483647
-    $rule.Direction = 1
-    $rule.Action = 1
-    $rule.Enabled = $true
-    if (!$existing.Count) { $policy.Rules.Add($rule) }
-    $verified = $policy.Rules.Item($RuleName)
-    if (!$verified.Enabled -or [int]$verified.Direction -ne 1 -or [int]$verified.Action -ne 1 -or
-        [int]$verified.Protocol -ne $protocolNumber -or [int]$verified.Profiles -ne 2147483647 -or
-        [string]$verified.LocalAddresses -ne '*' -or [string]$verified.InterfaceTypes -ne 'All' -or
-        $verified.ApplicationName -or $verified.ServiceName -or
-        (([string]$verified.RemoteAddresses -split ',' | Sort-Object) -join ',') -ne (($remoteAddresses -split ',' | Sort-Object) -join ',')) {
-        throw "Native firewall rule $RuleName failed readback verification."
-    }
-    if ($Protocol -eq 'ICMPv4') {
-        if ([string]$verified.IcmpTypesAndCodes -ne '8:*') { throw "ICMP rule $RuleName did not read back as echo-request access." }
-    } elseif ((([string]$verified.LocalPorts -split ',' | Sort-Object) -join ',') -ne (($Port | Sort-Object) -join ',') -or [string]$verified.RemotePorts -ne '*') {
-        throw "Native firewall rule $RuleName port readback did not match."
-    }
+    $operation = 'read existing native firewall policy'
+    try {
+        $policy = Get-NativeFirewallPolicy
+        $protocolNumber = @{TCP=6;UDP=17;ICMPv4=1}[$Protocol]
+        $remoteAddresses = if ($Address -contains 'Any' -or $Address -contains '*') { '*' } else { $Address -join ',' }
+        $operation = 'enumerate existing rules'
+        $existing = @($policy.Rules | Where-Object Name -eq $RuleName)
+        if ($existing.Count -gt 1) { throw "Multiple firewall rules are named $RuleName; review them before changing policy." }
+        if ($existing.Count -and ([int]$existing[0].Protocol -ne $protocolNumber -or $existing[0].ApplicationName -or $existing[0].ServiceName)) {
+            throw "Existing rule $RuleName has a different protocol or an application/service restriction; review it manually."
+        }
+        $arguments = @('advfirewall','firewall',$(if ($existing.Count) { 'set' } else { 'add' }),'rule',"name=$RuleName")
+        if ($existing.Count) { $arguments += 'new' }
+        $arguments += @('dir=in','action=allow','enable=yes','profile=any','localip=any',
+            "remoteip=$(if ($remoteAddresses -eq '*') { 'any' } else { $remoteAddresses })",'interfacetype=any','edge=no','security=notrequired',
+            'description=CCDC domain controller inbound service access')
+        if ($Protocol -eq 'ICMPv4') { $arguments += 'protocol=icmpv4:8,any' }
+        else { $arguments += @("protocol=$Protocol","localport=$($Port -join ',')",'remoteport=any') }
+        $operation = 'write rule with netsh'
+        Invoke-FirewallNetsh -Arguments $arguments
+        $operation = 'read back rule after netsh succeeded'
+        $policy = Get-NativeFirewallPolicy
+        $verified = $policy.Rules.Item($RuleName)
+        if (!$verified.Enabled -or [int]$verified.Direction -ne 1 -or [int]$verified.Action -ne 1 -or
+            [int]$verified.Protocol -ne $protocolNumber -or [int]$verified.Profiles -ne 2147483647 -or
+            [string]$verified.LocalAddresses -ne '*' -or [string]$verified.InterfaceTypes -ne 'All' -or
+            $verified.ApplicationName -or $verified.ServiceName -or
+            (([string]$verified.RemoteAddresses -split ',' | Sort-Object) -join ',') -ne (($remoteAddresses -split ',' | Sort-Object) -join ',')) {
+            throw "Native firewall rule $RuleName failed readback verification."
+        }
+        if ($Protocol -eq 'ICMPv4') {
+            if ([string]$verified.IcmpTypesAndCodes -ne '8:*') { throw "ICMP rule $RuleName did not read back as echo-request access." }
+        } elseif ((([string]$verified.LocalPorts -split ',' | Sort-Object) -join ',') -ne (($Port | Sort-Object) -join ',') -or [string]$verified.RemotePorts -ne '*') {
+            throw "Native firewall rule $RuleName port readback did not match."
+        }
+    } catch { throw "Firewall rule '$RuleName' failed during '${operation}': $($_.Exception.Message) [$($_.FullyQualifiedErrorId)]" }
 }
 
 function Set-AllowRule {
@@ -657,19 +737,18 @@ function Set-AllowRule {
 function Set-NativeFirewallProfiles {
     param([ValidateSet('Enabled','DefaultPolicy','Logging')][string]$Setting)
     $policy = Get-NativeFirewallPolicy
-    $netsh = "$env:SystemRoot\System32\netsh.exe"
     switch ($Setting) {
         Enabled {
             foreach ($profile in 1,2,4) {
                 if ($policy.BlockAllInboundTraffic($profile)) { throw "Firewall profile $profile blocks all inbound exceptions; review policy before enabling enforcement." }
             }
-            Invoke-Native $netsh @('advfirewall','set','allprofiles','state','on')
+            Invoke-FirewallNetsh @('advfirewall','set','allprofiles','state','on')
             foreach ($profile in 1,2,4) {
                 if (!$policy.FirewallEnabled($profile)) { throw "Firewall profile $profile did not read back as enabled." }
             }
         }
         DefaultPolicy {
-            Invoke-Native $netsh @('advfirewall','set','allprofiles','firewallpolicy','blockinbound,allowoutbound')
+            Invoke-FirewallNetsh @('advfirewall','set','allprofiles','firewallpolicy','blockinbound,allowoutbound')
             foreach ($profile in 1,2,4) {
                 if ([int]$policy.DefaultInboundAction($profile) -ne 0 -or [int]$policy.DefaultOutboundAction($profile) -ne 1) {
                     throw "Firewall profile $profile default-policy readback did not match."
@@ -677,10 +756,10 @@ function Set-NativeFirewallProfiles {
             }
         }
         Logging {
-            Invoke-Native $netsh @('advfirewall','set','allprofiles','logging','allowedconnections','enable')
-            Invoke-Native $netsh @('advfirewall','set','allprofiles','logging','droppedconnections','enable')
-            Invoke-Native $netsh @('advfirewall','set','allprofiles','logging','maxfilesize','32767')
-            Invoke-Native $netsh @('advfirewall','show','allprofiles','logging')
+            Invoke-FirewallNetsh @('advfirewall','set','allprofiles','logging','allowedconnections','enable')
+            Invoke-FirewallNetsh @('advfirewall','set','allprofiles','logging','droppedconnections','enable')
+            Invoke-FirewallNetsh @('advfirewall','set','allprofiles','logging','maxfilesize','32767')
+            Invoke-FirewallNetsh @('advfirewall','show','allprofiles','logging')
         }
     }
 }
@@ -994,12 +1073,8 @@ Invoke-Step 'Discover installed services/listeners/sites BEFORE any password or 
     if ($script:InitialServiceInventory.IisSitesXml) { Write-Host $script:InitialServiceInventory.IisSitesXml }
     foreach ($issue in $script:InitialServiceInventory.Issues) { Write-Warning "$($issue.Source): $($issue.Error)" }
 } | Out-Null
-Invoke-Step 'Set timestamped PowerShell and child CMD prompts for this session' {
-    function global:prompt {
-        "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')] | PS $(Get-Location)`n--> "
-    }
-    $env:PROMPT = '$D$S$T$H$H$H$S$B$S$P$_--$G'
-    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')] Shell timestamps enabled."
+Invoke-Step 'Persist timestamped PowerShell and child CMD prompts for the current user across PowerShell restarts' {
+    Install-TimestampPrompt
 } | Out-Null
 
 $script:CanWriteReport = Invoke-Step "Create protected report directory: $report" {
@@ -1098,31 +1173,14 @@ if ($Mode -ne 'Audit') {
             Write-Host 'Saved for the next sign-in/restart; the active desktop may retain its cached setting. Verify five-Shift behavior afterward. Accessibility binaries and debugger redirects are not modified.'
         } | Out-Null
     }
-    Invoke-Step 'Disable SMBv1 on the SMB server' {
-        $configuration = Get-SmbStepConfiguration -Side Server
-        if ($configuration.EnableSMB1Protocol -eq $false) {
-            throw [System.OperationCanceledException]::new('SMBv1 is already disabled; no change is needed.')
-        }
-        Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop
-        if ((Get-SmbServerConfiguration -ErrorAction Stop).EnableSMB1Protocol -ne $false) {
-            throw 'SMBv1 server setting did not read back as disabled.'
-        }
+    Invoke-Step 'Disable SMBv1 on the SMB server (native registry; restart required)' -CompletionStatus PendingRestart {
+        Set-SmbRegistrySetting -Side Server -SettingName SMB1 -Value 0
     } | Out-Null
-    Invoke-Step 'Require SMB SERVER signing' {
-        $configuration = Get-SmbStepConfiguration -Side Server
-        if ($configuration.RequireSecuritySignature -eq $true) { return }
-        Set-SmbServerConfiguration -RequireSecuritySignature $true -Force -ErrorAction Stop
-        if ((Get-SmbServerConfiguration -ErrorAction Stop).RequireSecuritySignature -ne $true) {
-            throw 'SMB server signing requirement did not read back as enabled.'
-        }
+    Invoke-Step 'Require SMB SERVER signing (native registry; restart required)' -CompletionStatus PendingRestart {
+        Set-SmbRegistrySetting -Side Server -SettingName RequireSecuritySignature -Value 1
     } | Out-Null
-    Invoke-Step 'Require SMB CLIENT signing' {
-        $configuration = Get-SmbStepConfiguration -Side Client
-        if ($configuration.RequireSecuritySignature -eq $true) { return }
-        Set-SmbClientConfiguration -RequireSecuritySignature $true -Force -ErrorAction Stop
-        if ((Get-SmbClientConfiguration -ErrorAction Stop).RequireSecuritySignature -ne $true) {
-            throw 'SMB client signing requirement did not read back as enabled.'
-        }
+    Invoke-Step 'Require SMB CLIENT signing (native registry; restart required)' -CompletionStatus PendingRestart {
+        Set-SmbRegistrySetting -Side Client -SettingName RequireSecuritySignature -Value 1
     } | Out-Null
     Invoke-Step 'Restrict network-logon access to Service Control Manager (PsExec-style service creation; also blocks legitimate remote service management; requires protected backup directory)' {
         Protect-ScManagerNetworkAccess
@@ -1165,7 +1223,7 @@ if ($Mode -ne 'Audit') {
     } | Out-Null
 
     Write-Host "`n3. Firewall and connections" -ForegroundColor Cyan
-    Write-Host 'Firewall backend: native Windows Firewall COM API and netsh; firewall configuration does not use CIM.'
+    Write-Host 'Firewall backend: netsh rule writes and native API verification; no firewall CIM calls or COM rule setters.'
     $script:FirewallServicesReady = Invoke-Step 'Start BFE and Windows Defender Firewall services (existing firewall policy takes effect)' {
         Start-FirewallServices
     }
@@ -1334,6 +1392,10 @@ if ($script:CanWriteReport) {
     Write-Host "Report directory: $report"
 }
 $script:Results | Format-Table -AutoSize
+$pendingRestartSteps = @($script:Results | Where-Object Status -eq 'PendingRestart')
+if ($pendingRestartSteps.Count) {
+    Write-Warning "$($pendingRestartSteps.Count) step(s) saved settings that require a planned restart and verification. Active SMB protection was not verified. No automatic restart was performed."
+}
 $failedSteps = @($script:Results | Where-Object Status -eq 'Failed')
 if ($failedSteps.Count) {
     Write-Warning "Walkthrough ended with $($failedSteps.Count) failed step(s). Earlier successful changes remain applied; review the failed steps and report before retrying."
