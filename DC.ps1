@@ -506,8 +506,11 @@ function Reset-KrbtgtKeyOnce {
 }
 
 function Invoke-KrbtgtRotation {
-    if (!$script:CanWriteReport -or !$script:SystemStateBackupVerified) {
-        throw 'KRBTGT rotation requires protected reports and a successful system-state backup in this run. Supply -SystemStateBackupTarget and review recovery readiness.'
+    if (!$script:CanWriteReport) {
+        throw 'KRBTGT rotation requires protected report storage. Accept the report-directory step and resolve any storage errors before retrying.'
+    }
+    if (!$script:SystemStateBackupVerified) {
+        Write-Warning 'No successful system-state backup was recorded in this run. Recovery readiness is unverified; -SystemStateBackupTarget remains available for a backup. This does not block the requested single reset.'
     }
     $localDc = Get-ADDomainController -Identity $env:COMPUTERNAME -Server $adServer -ErrorAction Stop
     if ($localDc.IsReadOnly -or $localDc.HostName -ine $domain.PDCEmulator) {
@@ -523,7 +526,7 @@ function Invoke-KrbtgtRotation {
     if (([datetime]::UtcNow - [datetime]::FromFileTimeUtc($before.PasswordLastSet)) -lt $wait) {
         throw 'KRBTGT was changed too recently. No reset was performed; inspect prior rotation records before retrying.'
     }
-    $state = [ordered]@{Domain=$domain.DNSRoot;Server=$adServer;Phase='ResetPending';Before=$before;After=$null}
+    $state = [ordered]@{Domain=$domain.DNSRoot;Server=$adServer;SystemStateBackupVerified=[bool]$script:SystemStateBackupVerified;Phase='ResetPending';Before=$before;After=$null}
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8 -ErrorAction Stop
     Write-Warning 'KRBTGT rotation is starting. Notify the AD/Windows, SQL, application and scoring operators. User/service passwords do not change; authentication may require recovery if dependencies or replication are unhealthy.'
     Write-Host 'Enter and confirm a password using the hidden prompts. Windows generates its own KRBTGT secret internally; this is not a normal login password and must not be submitted to scoring.'
@@ -662,6 +665,21 @@ function Get-DefenderFeatureState {
         throw "Unrecognized Defender feature state: $state"
     }
     return $state
+}
+
+function Get-DefenderInstallationStatus {
+    $state = Get-DefenderFeatureState
+    $services = @(Get-Service -ErrorAction Stop | Where-Object Name -eq 'WinDefend')
+    $commandPath = $null
+    try { $commandPath = Get-DefenderCommandPath } catch {}
+    [pscustomobject]@{
+        FeatureState=$state
+        Installed=($state -eq 'Enabled' -and $services.Count -gt 0 -and !!$commandPath)
+        ServiceState=if ($services.Count) { [string]$services[0].Status } else { 'Not found' }
+        UpdaterPresent=[bool]$commandPath
+        RestartNeeded=($state -in @('Enable Pending','Disable Pending'))
+        ProtectionVerified=$false
+    }
 }
 
 function Write-DefenderInstallRetry {
@@ -1200,16 +1218,35 @@ function Assert-LocalDomainController {
 }
 
 function Invoke-DefenderOnlyPlan {
-    Write-Host 'Defender-only mode: real-time protection and signature updates; exits without running the AD walkthrough.' -ForegroundColor Cyan
+    Write-Host 'Defender-only mode: install if missing, enable real-time protection and update signatures; exits without running the AD walkthrough.' -ForegroundColor Cyan
     if ($Mode -eq 'Audit') {
+        Invoke-Step 'Check Defender installation (read-only)' { Get-DefenderInstallationStatus } | Out-Null
         Invoke-Step 'Review Microsoft Defender status (read-only)' { Get-DefenderRuntimeStatus } | Out-Null
     } else {
-        Invoke-Step 'Enable Microsoft Defender real-time protection and verify active status' {
-            Enable-DefenderRealtimeProtection
-        } | Out-Null
-        Invoke-Step 'Update Microsoft Defender signatures (uses native MpCmdRun if the PowerShell update fails)' {
-            Update-DefenderSignatures
-        } | Out-Null
+        $installationState = @{Ready=$false}
+        $installationCompleted = Invoke-Step 'Check Defender installation and install its Windows Server feature if missing (native DISM; no automatic reboot)' {
+            $installation = Ensure-DefenderFeatureInstalled
+            $installation | Format-List | Out-Host
+            if ($installation.RestartNeeded) {
+                $script:Results.Add([pscustomobject]@{Step='Defender feature servicing';Status='PendingRestart';Error='Coordinate a reboot, then rerun .\DC.ps1 -Defender to enable protection and update signatures. No automatic reboot was performed.'})
+                Write-Warning 'Defender installation needs a planned restart. Protection enabling and signature updates are deferred until after that restart.'
+            } else {
+                $installationState.Ready = $true
+            }
+        }
+        $actions = [ordered]@{
+            'Enable Microsoft Defender real-time protection and verify active status' = { Enable-DefenderRealtimeProtection }
+            'Update Microsoft Defender signatures (uses native MpCmdRun if the PowerShell update fails)' = { Update-DefenderSignatures }
+        }
+        foreach ($stepName in $actions.Keys) {
+            if (($installationCompleted -and $installationState.Ready) -or $WhatIfPreference) {
+                Invoke-Step $stepName $actions[$stepName] | Out-Null
+            } else {
+                $reason = 'Installation check was skipped, failed, or requires a restart. Rerun -Defender after resolving it.'
+                $script:Results.Add([pscustomobject]@{Step=$stepName;Status='Skipped';Error=$reason})
+                Write-Host "[Skipped] $stepName ($reason)"
+            }
+        }
     }
     $script:Results | Format-Table -Wrap -AutoSize | Out-Host
     $failedSteps = @($script:Results | Where-Object Status -eq 'Failed')
@@ -1459,7 +1496,7 @@ if ($Mode -ne 'Audit') {
     Set-RegistryDword 'Include command lines in process creation events' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled' 1
     Set-RegistryDword 'Enable UAC (may require a later reboot)' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLUA' 1
     Set-RegistryDword 'Require administrator consent on the secure desktop' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin' 2
-    Write-Host 'Real-time protection enabling and signature updates run separately: .\DC.ps1 -Defender. The installation check remains in this walkthrough.'
+    Write-Host 'Defender installation, real-time protection enabling and signature updates run separately: .\DC.ps1 -Defender. This walkthrough only checks installation.'
     Write-Host "`n5. AD hardening and triage" -ForegroundColor Cyan
     Set-RegistryDword 'Require NTLMv2 and refuse LM/NTLMv1' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LmCompatibilityLevel' 5
     Set-RegistryDword 'Disable WDigest plaintext credential caching (verify after new logons/restart; no automatic restart)' 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0
@@ -1531,19 +1568,18 @@ Invoke-Step 'Review AD CS and KRBTGT recovery requirements manually' {
 Invoke-Step 'Review incident-response follow-up manually' {
     Write-Host 'Test DNS, Kerberos, LDAP, SYSVOL, replication, console access and scoring. Use Sysinternals/external scans. Review evidence before killing processes or deleting tasks/services/registry entries. Record incidents. No automatic reboot.'
 } | Out-Null
+Invoke-Step 'Check Defender installation (read-only; use -Defender to install if missing)' {
+    $installation = Get-DefenderInstallationStatus
+    $installation | Format-List | Out-Host
+    if ($installation.RestartNeeded) {
+        Write-Warning 'Defender feature servicing is pending a restart. Coordinate the restart, then run .\DC.ps1 -Defender.'
+    } elseif (!$installation.Installed) {
+        Write-Host 'Defender installation is missing, disabled or incomplete. Run .\DC.ps1 -Defender to check/install it and enable protection. No installation was attempted in this walkthrough.'
+    }
+    Write-Host 'This checks installation only; it does not verify active real-time protection.'
+} | Out-Null
 if ($Mode -ne 'Audit') {
-    Invoke-Step 'Check Defender installation and install its Windows Server feature if missing (native DISM; no automatic reboot)' {
-        $installation = Ensure-DefenderFeatureInstalled
-        $installation | Format-List | Out-Host
-        if ($installation.RestartNeeded) {
-            $script:Results.Add([pscustomobject]@{Step='Defender feature servicing';Status='PendingRestart';Error='Coordinate a reboot, then recheck feature installation, update signatures and verify protection. No automatic reboot was performed.'})
-        } elseif ($installation.Outcome -eq 'Installed') {
-            Write-Host 'Defender feature installed. Run .\DC.ps1 -Defender separately to enable real-time protection and update signatures when ready.'
-        }
-    } | Out-Null
-}
-if ($Mode -ne 'Audit') {
-    Invoke-Step 'Reset KRBTGT ONCE (asks for a password; requires healthy replication and a verified system-state backup)' {
+    Invoke-Step 'Reset KRBTGT ONCE (asks for a password; checks replication and prevents a recent repeat reset)' {
         Write-Warning 'A single reset retains the previous KRBTGT key. It does not by itself evict attackers or complete recovery from stolen KRBTGT keys.'
         Invoke-KrbtgtRotation
     } | Out-Null
