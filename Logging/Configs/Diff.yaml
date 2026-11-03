@@ -1,0 +1,324 @@
+name: Custom.CCDC.Diff
+description: |
+  Diff to be used against Custom.CCDC.Baseline . 
+
+type: SERVER
+
+parameters:
+  - name: BaseHunt
+    description: Baseline hunt ID (blank = latest Custom.CCDC.Baseline hunt)
+    default: ""
+  - name: NowHunt
+    description: Delta hunt ID (blank = latest Custom.CCDC.Delta hunt)
+    default: ""
+  - name: BruteForceThreshold
+    type: int
+    default: "10"
+  - name: LabRegex
+    description: Outbound destinations matching this are treated as internal
+    default: '^(172\.(16|17|20|25|31)\.|127\.|::1|fe80)'
+
+# export: VQL that is prepended to every source in this artifact
+export: |
+  LET LatestBase <= SELECT HuntId FROM hunts() WHERE "Custom.CCDC.Baseline" IN Artifacts ORDER BY Created DESC LIMIT 1
+  LET LatestNow <= SELECT HuntId FROM hunts() WHERE "Custom.CCDC.Delta" IN Artifacts ORDER BY Created DESC LIMIT 1
+  LET BaseId <= if(condition=BaseHunt, then=BaseHunt, else=LatestBase[0].HuntId)
+  LET NowId <= if(condition=NowHunt, then=NowHunt, else=LatestNow[0].HuntId)
+  LET Host(c) = client_info(client_id=c).os_info.fqdn
+
+sources:
+  # ------------------------------------------------------------------
+  - name: Info.Hunts
+    query: |
+      -- which hunts were compared + which clients reported in the Delta
+      SELECT BaseId AS BaseHunt, NowId AS NowHunt FROM scope()
+
+  - name: Info.Coverage
+    query: |
+      SELECT Host(c=ClientId) AS Host, CollectedAt, SinceTime
+      FROM source(artifact="Custom.CCDC.Delta/Meta", hunt_id=NowId)
+      ORDER BY Host
+
+  # ------------------------------------------------------------------
+  # WINDOWS: state diffs
+  # ------------------------------------------------------------------
+  - name: Diff.Win.Services
+    query: |
+      LET K(c, n, p) = format(format="%v|%v|%v", args=[c, n, p])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, n=Name, p=PathName) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.Services", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, Name, DisplayName, PathName, StartName, StartMode, State
+      FROM source(artifact="Custom.CCDC.Delta/Win.Services", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, n=Name, p=PathName)]
+
+  - name: Diff.Win.ScheduledTasks
+    query: |
+      LET K(c, p, cmd) = format(format="%v|%v|%v", args=[c, p, cmd])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, p=OSPath, cmd=Command) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.ScheduledTasks", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, *
+      FROM source(artifact="Custom.CCDC.Delta/Win.ScheduledTasks", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, p=OSPath, cmd=Command)]
+
+  - name: Diff.Win.WMIPersistence
+    query: |
+      LET K(c, r) = format(format="%v|%v", args=[c, r])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, r=serialize(item=_Row)) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.WMIPersistence", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, *
+      FROM source(artifact="Custom.CCDC.Delta/Win.WMIPersistence", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, r=serialize(item=_Row))]
+
+  - name: Diff.Win.RegistryPersistence
+    query: |
+      LET K(c, p, v) = format(format="%v|%v|%v", args=[c, p, v])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, p=FullPath, v=Value) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.RegistryPersistence", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, FullPath, Value, Mtime
+      FROM source(artifact="Custom.CCDC.Delta/Win.RegistryPersistence", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, p=FullPath, v=Value)]
+
+  - name: Diff.Win.StickyKeys
+    query: |
+      -- accessibility binary is now a copy of cmd.exe
+      SELECT Host(c=ClientId) AS Host, FullPath, Mtime, SHA256, IsCmdExe
+      FROM source(artifact="Custom.CCDC.Delta/Win.StickyKeys", hunt_id=NowId)
+      WHERE IsCmdExe
+
+  - name: Diff.Win.LocalUsers
+    query: |
+      LET K(c, r) = format(format="%v|%v", args=[c, r])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, r=serialize(item=_Row)) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.LocalUsers", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, *
+      FROM source(artifact="Custom.CCDC.Delta/Win.LocalUsers", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, r=serialize(item=_Row))]
+
+  - name: Diff.Win.WebRoot
+    query: |
+      LET K(c, p, h) = format(format="%v|%v|%v", args=[c, p, h])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, p=FullPath, h=SHA256) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.WebRoot", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, FullPath, Size, Mtime, Ctime, SHA256
+      FROM source(artifact="Custom.CCDC.Delta/Win.WebRoot", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, p=FullPath, h=SHA256)]
+
+  # ---------------- Active Directory ----------------
+  - name: Diff.AD.PrivGroups
+    query: |
+      LET K(g, u) = format(format="%v|%v", args=[g, u])
+      LET Base <= to_dict(item={
+        SELECT K(g=Group, u=SamAccountName) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.ADPrivGroups", hunt_id=BaseId) })
+      SELECT Group, SamAccountName, objectClass
+      FROM source(artifact="Custom.CCDC.Delta/Win.ADPrivGroups", hunt_id=NowId)
+      WHERE NOT Base[K(g=Group, u=SamAccountName)]
+
+  - name: Diff.AD.Users
+    query: |
+      -- new accounts, enable/disable flips, and password resets since baseline
+      LET K(u, e, p) = format(format="%v|%v|%v", args=[u, e, p])
+      LET Base <= to_dict(item={
+        SELECT K(u=SamAccountName, e=Enabled, p=PwdSet) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.ADUsers", hunt_id=BaseId) })
+      SELECT SamAccountName, Enabled, AdminCount, Created, PwdSet, LastLogon
+      FROM source(artifact="Custom.CCDC.Delta/Win.ADUsers", hunt_id=NowId)
+      WHERE NOT Base[K(u=SamAccountName, e=Enabled, p=PwdSet)]
+
+  - name: Diff.AD.GPO
+    query: |
+      LET K(i, m) = format(format="%v|%v", args=[i, m])
+      LET Base <= to_dict(item={
+        SELECT K(i=Id, m=Modified) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.GPO", hunt_id=BaseId) })
+      SELECT DisplayName, Id, Modified
+      FROM source(artifact="Custom.CCDC.Delta/Win.GPO", hunt_id=NowId)
+      WHERE NOT Base[K(i=Id, m=Modified)]
+
+  - name: Diff.AD.Sysvol
+    query: |
+      LET K(p, h) = format(format="%v|%v", args=[p, h])
+      LET Base <= to_dict(item={
+        SELECT K(p=FullPath, h=SHA256) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Win.SysvolRecent", hunt_id=BaseId) })
+      SELECT FullPath, Size, Mtime, Ctime, SHA256
+      FROM source(artifact="Custom.CCDC.Delta/Win.SysvolRecent", hunt_id=NowId)
+      WHERE NOT Base[K(p=FullPath, h=SHA256)]
+
+  # ------------------------------------------------------------------
+  # BOTH OSes: processes + network
+  # ------------------------------------------------------------------
+  - name: Diff.Processes
+    query: |
+      LET K(c, e, h) = format(format="%v|%v|%v", args=[c, e, h])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, e=Exe, h=SHA256) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Processes", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, Pid, Ppid, Name, Exe, CommandLine, Username, SHA256
+      FROM source(artifact="Custom.CCDC.Delta/Processes", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, e=Exe, h=SHA256)]
+
+  - name: Diff.NewListeners
+    query: |
+      LET K(c, n, port) = format(format="%v|%v|%v", args=[c, n, port])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, n=ProcName, port=LPort) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Netstat", hunt_id=BaseId)
+        WHERE Status = "LISTEN" })
+      SELECT Host(c=ClientId) AS Host, Pid, ProcName, ProcExe, LIP, LPort
+      FROM source(artifact="Custom.CCDC.Delta/Netstat", hunt_id=NowId)
+      WHERE Status = "LISTEN" AND NOT Base[K(c=ClientId, n=ProcName, port=LPort)]
+
+  - name: Triage.Outbound
+    query: |
+      -- established connections to non-lab addresses (reverse shells / beacons)
+      SELECT Host(c=ClientId) AS Host, Pid, ProcName, ProcExe, LIP, LPort, RIP, RPort
+      FROM source(artifact="Custom.CCDC.Delta/Netstat", hunt_id=NowId)
+      WHERE Status = "ESTABLISHED" AND NOT RIP =~ LabRegex
+      ORDER BY Host
+
+  # ------------------------------------------------------------------
+  # LINUX
+  # ------------------------------------------------------------------
+  - name: Diff.Lin.Persistence
+    query: |
+      LET K(c, p) = format(format="%v|%v", args=[c, p])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, p=FullPath) AS _key, SHA256 AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Lin.Persistence", hunt_id=BaseId) })
+      SELECT * FROM {
+        SELECT Host(c=ClientId) AS Host, FullPath, Mtime, Ctime, SHA256,
+               if(condition=Base[K(c=ClientId, p=FullPath)] = NULL, then="NEW",
+                  else=if(condition=Base[K(c=ClientId, p=FullPath)] != SHA256,
+                          then="MODIFIED", else="touched-only")) AS Status
+        FROM source(artifact="Custom.CCDC.Delta/Lin.Persistence", hunt_id=NowId)
+      } WHERE Status != "touched-only"
+
+  - name: Diff.Lin.SUID
+    query: |
+      LET K(c, p, h) = format(format="%v|%v|%v", args=[c, p, h])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, p=FullPath, h=SHA256) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Lin.SUID", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, FullPath, Mode, Mtime, SHA256
+      FROM source(artifact="Custom.CCDC.Delta/Lin.SUID", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, p=FullPath, h=SHA256)]
+
+  - name: Diff.Lin.Accounts
+    query: |
+      -- new/changed passwd entries, plus any UID 0 that isn't root
+      LET K(c, u, uid, sh) = format(format="%v|%v|%v|%v", args=[c, u, uid, sh])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, u=User, uid=UID, sh=Shell) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Lin.PasswdEntries", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, User, UID, GID, Home, Shell, IsUID0
+      FROM source(artifact="Custom.CCDC.Delta/Lin.PasswdEntries", hunt_id=NowId)
+      WHERE (NOT Base[K(c=ClientId, u=User, uid=UID, sh=Shell)]) OR (IsUID0 AND User != "root")
+
+  - name: Diff.Lin.AuthorizedKeys
+    query: |
+      LET K(c, k) = format(format="%v|%v", args=[c, k])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, k=Key) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Lin.AuthorizedKeys", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, *
+      FROM source(artifact="Custom.CCDC.Delta/Lin.AuthorizedKeys", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, k=Key)]
+
+  - name: Diff.Lin.Crontab
+    query: |
+      LET K(c, r) = format(format="%v|%v", args=[c, r])
+      LET Base <= to_dict(item={
+        SELECT K(c=ClientId, r=serialize(item=_Row)) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Baseline/Lin.Crontab", hunt_id=BaseId) })
+      SELECT Host(c=ClientId) AS Host, *
+      FROM source(artifact="Custom.CCDC.Delta/Lin.Crontab", hunt_id=NowId)
+      WHERE NOT Base[K(c=ClientId, r=serialize(item=_Row))]
+
+  - name: Triage.Lin.Webshells
+    query: |
+      -- suspicious content first; every row is a web file changed since SinceTime
+      SELECT Host(c=ClientId) AS Host, FullPath, Size, Mtime, Ctime, Suspect, SHA256
+      FROM source(artifact="Custom.CCDC.Delta/Lin.WebRoot", hunt_id=NowId)
+      ORDER BY Suspect DESC, Ctime DESC
+
+  - name: Triage.Lin.ProcSuspect
+    query: |
+      SELECT Host(c=ClientId) AS Host, Pid, Ppid, Name, Exe, CommandLine, Username
+      FROM source(artifact="Custom.CCDC.Delta/Lin.ProcSuspect", hunt_id=NowId)
+
+  - name: Triage.Lin.Auth
+    query: |
+      SELECT Host(c=ClientId) AS Host, *
+      FROM source(artifact="Custom.CCDC.Delta/Lin.Auth", hunt_id=NowId)
+
+  # ------------------------------------------------------------------
+  # WINDOWS EVENTS: triage (no baseline needed)
+  # ------------------------------------------------------------------
+  - name: Triage.Win.Timeline
+    query: |
+      -- account / group / service / task / audit-policy / log-clear changes, in order
+      SELECT EventTime, Host(c=ClientId) AS Host, Computer, EventID,
+             SubjectUser, TargetUser, SrcIP, NewProc, CmdLine
+      FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
+      WHERE EventID IN [4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4738, 4740, 4756,
+                        4697, 4698, 4699, 4702, 4719, 1102]
+      ORDER BY EventTime
+
+  - name: Triage.Win.BruteForce
+    query: |
+      -- source/user pairs with many failures, and whether the same pair later succeeded
+      LET Wins <= to_dict(item={
+        SELECT format(format="%v|%v", args=[SrcIP, TargetUser]) AS _key, TRUE AS _value
+        FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
+        WHERE EventID = 4624 })
+      SELECT * FROM {
+        SELECT SrcIP, TargetUser, count() AS Failures,
+               Wins[format(format="%v|%v", args=[SrcIP, TargetUser])] AS ThenSucceeded
+        FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
+        WHERE EventID = 4625
+        GROUP BY SrcIP, TargetUser
+      } WHERE Failures > BruteForceThreshold
+      ORDER BY Failures DESC
+
+  - name: Triage.Win.LogonsBySource
+    query: |
+      -- who is logging on to what, from where (successes, non-machine accounts)
+      SELECT SrcIP, TargetUser, LogonType, Computer, count() AS Count,
+             min(item=EventTime) AS First, max(item=EventTime) AS Last
+      FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
+      WHERE EventID = 4624 AND NOT SrcIP IN ["-", "::1", "127.0.0.1"]
+      GROUP BY SrcIP, TargetUser, LogonType, Computer
+      ORDER BY Count DESC
+
+  - name: Triage.Win.ProcessCreation
+    query: |
+      SELECT EventTime, Computer, SubjectUser, ParentProc, NewProc, CmdLine
+      FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
+      WHERE EventID = 4688
+      ORDER BY EventTime
+
+  - name: Triage.Win.System
+    query: |
+      -- 7045 new service, 104 log cleared, 7040 start type changed
+      SELECT EventTime, Computer, EventID, EventData
+      FROM source(artifact="Custom.CCDC.Delta/Win.System", hunt_id=NowId)
+      ORDER BY EventTime
+
+  - name: Triage.Win.PowerShell
+    query: |
+      SELECT EventTime, Computer, ScriptBlock
+      FROM source(artifact="Custom.CCDC.Delta/Win.PowerShell", hunt_id=NowId)
+      ORDER BY EventTime
+
+  - name: Triage.Win.Defender
+    query: |
+      SELECT EventTime, Computer, EventID, EventData
+      FROM source(artifact="Custom.CCDC.Delta/Win.Defender", hunt_id=NowId)
+      ORDER BY EventTime

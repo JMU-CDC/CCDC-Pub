@@ -1,0 +1,32 @@
+name: Custom.Server.Events.SplunkForward
+description: Forward client event artifacts to Splunk HEC
+type: SERVER_EVENT
+
+parameters:
+  - name: ArtifactsToWatch
+    default: Generic.Client.Stats,Windows.Events.ProcessCreation,Custom.Windows.Events.AllEventLogs
+  - name: SplunkURL
+    default: https://127.0.0.1:8088/services/collector
+  - name: SplunkToken
+    default: [][][] TOKEN HERE [][][]
+  - name: SplunkIndex
+    default: velociraptor
+  - name: SkipVerify
+    type: bool
+    default: Y
+
+sources:
+  - query: |
+      LET events = SELECT * FROM foreach(
+        row=split(string=ArtifactsToWatch, sep=","),
+        async=TRUE,
+        query={
+          SELECT *, _value AS Artifact,
+                 timestamp(epoch=now()) AS timestamp
+          FROM watch_monitoring(artifact=_value)
+        })
+
+      SELECT * FROM splunk_upload(
+        query=events, url=SplunkURL, token=SplunkToken, index=SplunkIndex,
+        skip_verify=SkipVerify, sourcetype="velociraptor:events",
+        timestamp_field="timestamp")

@@ -1,0 +1,267 @@
+name: Custom.CCDC.Baseline
+description: |
+  Initial collection to compare using diffs. 
+  TODO: Scanning baseline itself? combine with triage maybe
+
+  Collection settings: set CPU limit ~30-40% and timeout 1800s. Stagger if
+  AD/MSSQL/Ecom show service degradation in Quotient.
+
+type: CLIENT
+
+required_permissions:
+  - EXECVE
+
+parameters:
+  - name: UseAutoruns
+    description: Run Sysinternals Autoruns (server must be able to download autorunsc). Slow.
+    type: bool
+    default: "N"
+  - name: RunPkgVerify
+    description: Linux rpm -Va / dpkg -V to find modified packaged binaries. Slow (minutes).
+    type: bool
+    default: "N"
+  - name: WebRoots
+    description: Linux web root globs, comma separated
+    default: "/var/www/**,/usr/share/roundcube/**,/usr/share/nginx/**,/usr/share/httpd/**,/opt/**/webapps/**"
+  - name: WinWebRoots
+    default: "C:/inetpub/wwwroot/**,C:/xampp/htdocs/**"
+  - name: WebshellRegex
+    default: '(eval|assert|system|passthru|shell_exec|exec|popen|proc_open)\s*\(|base64_decode|\$_(GET|POST|REQUEST|COOKIE)\['
+
+sources:
+  # ---------------- BOTH OSes ----------------
+  - name: Meta
+    query: |
+      SELECT now() AS CollectedAt, Hostname, Fqdn, OS FROM info()
+
+  - name: Processes
+    query: |
+      SELECT Pid, Ppid, Name, Exe, CommandLine, Username,
+             hash(path=Exe).SHA256 AS SHA256
+      FROM pslist()
+
+  - name: Netstat
+    query: |
+      -- pslist() is a plugin, not a function, so build a Pid -> process lookup first
+      LET ProcMap <= to_dict(item={
+        SELECT format(format="%d", args=Pid) AS _key,
+               dict(ProcName=Name, ProcExe=Exe) AS _value
+        FROM pslist()
+      })
+
+      SELECT Pid,
+             get(item=ProcMap, field=format(format="%d", args=Pid)).ProcName AS ProcName,
+             get(item=ProcMap, field=format(format="%d", args=Pid)).ProcExe AS ProcExe,
+             FamilyString AS Family, TypeString AS Type, Status,
+             Laddr.IP AS LIP, Laddr.Port AS LPort,
+             Raddr.IP AS RIP, Raddr.Port AS RPort
+      FROM netstat()
+
+  # ---------------- WINDOWS ----------------
+  - name: Win.Services
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.System.Services()
+
+  - name: Win.ScheduledTasks
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.System.TaskScheduler()
+
+  - name: Win.Startup
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Sys.StartupItems()
+
+  - name: Win.WMIPersistence
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Persistence.PermanentWMIEvents()
+
+  - name: Win.Autoruns
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: |
+      SELECT * FROM if(condition=UseAutoruns,
+        then={ SELECT * FROM Artifact.Windows.Sysinternals.Autoruns() },
+        else={ SELECT * FROM scope() WHERE FALSE })
+
+  - name: Win.LocalUsers
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Sys.Users()
+
+  - name: Win.RegistryPersistence
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: |
+      -- Run keys, Winlogon Shell/Userinit, IFEO debuggers, Defender exclusions, RDP enable flag
+      SELECT FullPath, Data.value AS Value, Mtime
+      FROM glob(accessor="registry", globs=[
+        "HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/Run/*",
+        "HKEY_LOCAL_MACHINE/Software/Microsoft/Windows/CurrentVersion/RunOnce/*",
+        "HKEY_LOCAL_MACHINE/Software/Wow6432Node/Microsoft/Windows/CurrentVersion/Run/*",
+        "HKEY_USERS/*/Software/Microsoft/Windows/CurrentVersion/Run/*",
+        "HKEY_USERS/*/Software/Microsoft/Windows/CurrentVersion/RunOnce/*",
+        "HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows NT/CurrentVersion/Winlogon/Shell",
+        "HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows NT/CurrentVersion/Winlogon/Userinit",
+        "HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows NT/CurrentVersion/Image File Execution Options/*/Debugger",
+        "HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows Defender/Exclusions/**",
+        "HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Control/Terminal Server/fDenyTSConnections"
+      ])
+
+  - name: Win.StickyKeys
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: |
+      -- accessibility binaries swapped for cmd.exe
+      LET CmdHash <= hash(path="C:/Windows/System32/cmd.exe").SHA256
+      SELECT FullPath, Mtime, hash(path=FullPath).SHA256 AS SHA256,
+             hash(path=FullPath).SHA256 = CmdHash AS IsCmdExe
+      FROM glob(globs=[
+        "C:/Windows/System32/sethc.exe", "C:/Windows/System32/utilman.exe",
+        "C:/Windows/System32/osk.exe", "C:/Windows/System32/narrator.exe",
+        "C:/Windows/System32/magnify.exe", "C:/Windows/System32/displayswitch.exe"])
+
+  - name: Win.WebRoot
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: |
+      SELECT FullPath, Size, Mtime, Ctime,
+             hash(path=FullPath).SHA256 AS SHA256
+      FROM glob(globs=split(string=WinWebRoots, sep=","))
+      WHERE NOT IsDir
+
+  # --- Active Directory (only runs on a domain controller) ---
+  - name: Win.ADPrivGroups
+    precondition: |
+      SELECT * FROM wmi(query="SELECT DomainRole FROM Win32_ComputerSystem")
+      WHERE DomainRole >= 4
+    query: |
+      LET PS = '''
+      Import-Module ActiveDirectory
+      $groups = 'Domain Admins','Enterprise Admins','Schema Admins','Administrators','Backup Operators','Account Operators','Server Operators','Print Operators','DnsAdmins','Group Policy Creator Owners'
+      $r = foreach ($g in $groups) { Get-ADGroupMember $g -Recursive -ErrorAction SilentlyContinue | Select-Object @{n='Group';e={$g}}, SamAccountName, objectClass }
+      ConvertTo-Json -InputObject @($r) -Compress
+      '''
+      SELECT * FROM foreach(
+        row={ SELECT Stdout FROM execve(length=10000000,
+                argv=["powershell.exe","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",PS]) },
+        query={ SELECT * FROM parse_json_array(data=Stdout) })
+
+  - name: Win.ADUsers
+    precondition: |
+      SELECT * FROM wmi(query="SELECT DomainRole FROM Win32_ComputerSystem")
+      WHERE DomainRole >= 4
+    query: |
+      LET PS = '''
+      Import-Module ActiveDirectory
+      $u = Get-ADUser -Filter * -Properties whenCreated,PasswordLastSet,LastLogonDate,AdminCount,Enabled |
+        Select-Object SamAccountName, Enabled, AdminCount,
+          @{n='Created';e={$_.whenCreated.ToString('s')}},
+          @{n='PwdSet';e={if($_.PasswordLastSet){$_.PasswordLastSet.ToString('s')}}},
+          @{n='LastLogon';e={if($_.LastLogonDate){$_.LastLogonDate.ToString('s')}}}
+      ConvertTo-Json -InputObject @($u) -Compress
+      '''
+      SELECT * FROM foreach(
+        row={ SELECT Stdout FROM execve(length=10000000,
+                argv=["powershell.exe","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",PS]) },
+        query={ SELECT * FROM parse_json_array(data=Stdout) })
+
+  - name: Win.GPO
+    precondition: |
+      SELECT * FROM wmi(query="SELECT DomainRole FROM Win32_ComputerSystem")
+      WHERE DomainRole >= 4
+    query: |
+      LET PS = '''
+      Import-Module GroupPolicy
+      $g = Get-GPO -All | Select-Object DisplayName, Id, @{n='Modified';e={$_.ModificationTime.ToString('s')}}
+      ConvertTo-Json -InputObject @($g) -Compress
+      '''
+      SELECT * FROM foreach(
+        row={ SELECT Stdout FROM execve(length=10000000,
+                argv=["powershell.exe","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",PS]) },
+        query={ SELECT * FROM parse_json_array(data=Stdout) })
+
+  - name: Win.SysvolRecent
+    precondition: |
+      SELECT * FROM wmi(query="SELECT DomainRole FROM Win32_ComputerSystem")
+      WHERE DomainRole >= 4
+    query: |
+      SELECT FullPath, Size, Mtime, hash(path=FullPath).SHA256 AS SHA256
+      FROM glob(globs=["C:/Windows/SYSVOL/**"])
+      WHERE NOT IsDir
+
+  # ---------------- LINUX ----------------
+  - name: Lin.Services
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.Services()
+
+  - name: Lin.Crontab
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.Crontab()
+
+  - name: Lin.PasswdEntries
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      -- every /etc/passwd entry; UID 0 other than root is an instant red flag
+      SELECT F[0] AS User, F[2] AS UID, F[3] AS GID, F[5] AS Home, F[6] AS Shell,
+             F[2] = "0" AS IsUID0
+      FROM foreach(
+        row={ SELECT Line FROM parse_lines(filename="/etc/passwd") WHERE NOT Line =~ "^#" AND Line =~ ":" },
+        query={ SELECT split(string=Line, sep=":") AS F FROM scope() })
+
+  - name: Lin.AuthorizedKeys
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Ssh.AuthorizedKeys()
+
+  - name: Lin.Persistence
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      SELECT FullPath, Size, Mode, Mtime, Ctime, hash(path=FullPath).SHA256 AS SHA256
+      FROM glob(globs=[
+        "/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow", "/etc/hosts",
+        "/etc/resolv.conf", "/etc/environment", "/etc/profile", "/etc/profile.d/*",
+        "/etc/bash.bashrc", "/etc/bashrc", "/etc/ld.so.preload", "/etc/ld.so.conf.d/*",
+        "/etc/rc.local", "/etc/rc*.d/*", "/etc/init.d/*",
+        "/etc/cron*/**", "/var/spool/cron/**", "/var/spool/at/**",
+        "/etc/sudoers", "/etc/sudoers.d/*",
+        "/etc/pam.d/*", "/etc/security/*.conf",
+        "/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d/*", "/etc/ssh/ssh_config",
+        "/etc/update-motd.d/*", "/etc/apt/apt.conf.d/*", "/etc/yum.repos.d/*",
+        "/etc/aliases", "/etc/postfix/main.cf", "/etc/postfix/master.cf",
+        "/etc/systemd/system/**", "/usr/lib/systemd/system/*.service",
+        "/root/.ssh/*", "/home/*/.ssh/*", "/root/.bashrc", "/root/.profile",
+        "/home/*/.bashrc", "/home/*/.bash_profile", "/home/*/.profile"])
+      WHERE NOT IsDir
+
+  - name: Lin.SUID
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      -- shallow globs on purpose (no /usr/**); verify the Mode regex on one host
+      SELECT FullPath, Mode, Mtime, hash(path=FullPath).SHA256 AS SHA256
+      FROM glob(globs=[
+        "/usr/bin/*", "/usr/sbin/*", "/bin/*", "/sbin/*", "/usr/libexec/**",
+        "/usr/local/**", "/opt/**", "/tmp/**", "/var/tmp/**", "/dev/shm/**",
+        "/home/**", "/root/**"])
+      WHERE NOT IsDir AND Mode =~ "[ug]"
+
+  - name: Lin.WebRoot
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      SELECT FullPath, Size, Mtime, Ctime, hash(path=FullPath).SHA256 AS SHA256,
+             read_file(filename=FullPath, length=500000) =~ WebshellRegex AS Suspect
+      FROM glob(globs=split(string=WebRoots, sep=","))
+      WHERE NOT IsDir AND FullPath =~ "\\.(php|phtml|phar|jsp|jspx|asp|aspx|cgi|pl|py|sh)$"
+
+  - name: Lin.ProcSuspect
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      -- running from tmp-ish dirs, deleted binaries, memfd
+      SELECT Pid, Ppid, Name, Exe, CommandLine, Username
+      FROM pslist()
+      WHERE Exe =~ "^/(tmp|dev/shm|var/tmp)/" OR Exe =~ "deleted" OR Exe =~ "memfd"
+
+  - name: Lin.PkgVerify
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      SELECT * FROM if(condition=RunPkgVerify,
+        then={
+          SELECT Line FROM foreach(
+            row={ SELECT Stdout FROM execve(length=20000000, argv=["/bin/sh", "-c",
+                  "if command -v rpm >/dev/null 2>&1; then rpm -Va 2>/dev/null; else dpkg -V 2>/dev/null; fi; true"]) },
+            query={ SELECT Line FROM parse_lines(filename=Stdout, accessor="data") })
+          WHERE Line =~ "^[.?SM5DLUGTP]{5,}" OR Line =~ "^\\?\\?5"
+        },
+        else={ SELECT * FROM scope() WHERE FALSE })

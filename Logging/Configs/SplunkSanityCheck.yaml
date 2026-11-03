@@ -1,0 +1,16 @@
+name: Custom.Server.SplunkTest
+type: SERVER
+
+parameters:
+  - name: SplunkURL
+    default: https://127.0.0.1:8088/services/collector
+  - name: SplunkToken
+    default: PUT_YOUR_TOKEN_HERE
+
+sources:
+  - query: |
+      SELECT * FROM splunk_upload(
+        query={SELECT "hello from server artifact" AS Message,
+                      "ServerArtifactTest" AS Artifact FROM scope()},
+        url=SplunkURL, token=SplunkToken, index="velociraptor",
+        skip_verify=TRUE, sourcetype="velociraptor:events")

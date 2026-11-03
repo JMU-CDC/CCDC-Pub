@@ -1,0 +1,79 @@
+name: Custom.CCDC.DiffAuto
+description: |
+  Server event artifact. Add it under Server Events (View Server Events ->
+  Update server monitoring table). It does two things:
+
+  1. Differ   (always on): every PollSeconds, find the newest Custom.CCDC.Delta
+     hunt. Once it is at least SettleSeconds old and has not been diffed yet,
+     start a Custom.CCDC.Diff server collection against it.
+     Set SettleSeconds a bit above your Delta collection timeout (Delta
+     timeout 600s -> SettleSeconds 660).
+
+  2. Launcher (optional, OFF by default): every LaunchDeltaEverySeconds,
+     create a new Custom.CCDC.Delta hunt with SinceTime set to the previous
+     launch time minus DeltaOverlapSeconds. This closes the whole loop:
+     Delta hunt -> wait -> Diff, with no manual clicks.
+     EXPERIMENTAL: test it before the event. If hunt() or the metadata
+     functions differ in your version, launch Delta by hand and keep Differ.
+
+  Results of the Diff land in a normal server flow (client "server").
+
+type: SERVER_EVENT
+
+parameters:
+  - name: PollSeconds
+    type: int
+    default: "60"
+  - name: SettleSeconds
+    type: int
+    default: "660"
+  - name: LaunchDeltaEverySeconds
+    description: 0 = disabled. 1200 = every 20 minutes.
+    type: int
+    default: "0"
+  - name: DeltaOverlapSeconds
+    description: Re-cover this much of the previous window so slow clients don't miss events
+    type: int
+    default: "120"
+
+sources:
+  - name: Differ
+    query: |
+      SELECT * FROM foreach(
+        row={ SELECT * FROM clock(period=PollSeconds) },
+        query={
+          LET Latest <= SELECT HuntId, Created FROM hunts()
+                        WHERE "Custom.CCDC.Delta" IN Artifacts
+                        ORDER BY Created DESC LIMIT 1
+          LET Id = Latest[0].HuntId
+          LET AgeSeconds = now().Unix - timestamp(epoch=Latest[0].Created).Unix
+          SELECT Id AS NowHunt,
+                 collect_client(client_id="server", artifacts="Custom.CCDC.Diff",
+                                env=dict(NowHunt=Id)).flow_id AS DiffFlow,
+                 server_set_metadata(metadata=dict(ccdc_last_diffed=Id)) AS _marked
+          FROM scope()
+          WHERE Id AND AgeSeconds > SettleSeconds
+            AND Id != server_metadata().ccdc_last_diffed
+        })
+
+  - name: Launcher
+    query: |
+      SELECT * FROM if(condition=LaunchDeltaEverySeconds > 0,
+        then={
+          SELECT * FROM foreach(
+            row={ SELECT * FROM clock(period=LaunchDeltaEverySeconds) },
+            query={
+              LET Last <= server_metadata().ccdc_last_launch
+              LET Since = format(format="%v",
+                  args=timestamp(epoch=int(int=Last) - DeltaOverlapSeconds))
+              SELECT if(condition=Last,
+                        then=hunt(description="CCDC Delta (auto)",
+                                  artifacts="Custom.CCDC.Delta",
+                                  spec=dict(`Custom.CCDC.Delta`=dict(SinceTime=Since))),
+                        else=hunt(description="CCDC Delta (auto)",
+                                  artifacts="Custom.CCDC.Delta")).HuntId AS LaunchedHunt,
+                     server_set_metadata(metadata=dict(ccdc_last_launch=now().Unix)) AS _marked
+              FROM scope()
+            })
+        },
+        else={ SELECT * FROM scope() WHERE FALSE })

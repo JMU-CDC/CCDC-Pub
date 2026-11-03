@@ -1,0 +1,7 @@
+name: Custom.CCDC.Delta
+description: |
+  i lowk forgot to upload this one. will do l8r.
+type: CLIENT_EVENT
+sources:
+  - query: |
+      :)

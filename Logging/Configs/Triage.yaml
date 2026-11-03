@@ -1,0 +1,151 @@
+name: Custom.CCDC.Blue.Triage
+description: |
+  To be auto-run for highest visibility, intensive, only every 10 mins.
+
+type: CLIENT
+
+required_permissions:
+  - EXECVE
+
+parameters:
+  - name: WebRoots
+    description: Web root globs to check for recently modified files (webshells)
+    default: /var/www/**,/usr/share/nginx/**,/opt/**/webapps/**
+  - name: RecentDays
+    type: int
+    default: "2"
+  - name: WinWebRoots
+    default: C:/inetpub/wwwroot/**,C:/xampp/htdocs/**
+
+sources:
+  # ---------------- WINDOWS ----------------
+  - name: Win.Processes
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.System.Pslist()
+
+  - name: Win.Netstat
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Network.NetstatEnriched()
+
+  - name: Win.Services
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.System.Services()
+
+  - name: Win.ScheduledTasks
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.System.TaskScheduler()
+
+  - name: Win.Startup
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Sys.StartupItems()
+
+  - name: Win.WMIPersistence
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Persistence.PermanentWMIEvents()
+
+  - name: Win.Autoruns
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Sysinternals.Autoruns()
+
+  - name: Win.Users
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.Sys.Users()
+
+  - name: Win.RDPAuth
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.EventLogs.RDPAuth()
+
+  - name: Win.AccountManipulation
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: |
+      -- 4720 created, 4722 enabled, 4724/4723 pw reset/change, 4726 deleted,
+      -- 4728/4732/4756 added to group, 4738 changed, 4740 lockout, 1102 log cleared
+      SELECT timestamp(epoch=System.TimeCreated.SystemTime) AS EventTime,
+             System.EventID.Value AS EventID,
+             System.Computer AS Computer,
+             EventData, Message
+      FROM parse_evtx(filename="C:/Windows/System32/winevt/Logs/Security.evtx", accessor="auto")
+      WHERE EventID IN (4720, 4722, 4723, 4724, 4726, 4728, 4732, 4738, 4740, 4756, 1102)
+        AND EventTime > now() - RecentDays * 86400
+
+  - name: Win.ServiceCreation
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.EventLogs.ServiceCreationComspec()
+
+  - name: Win.PowershellScriptblock
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.EventLogs.PowershellScriptblock()
+
+  - name: Win.PSReadline
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: SELECT * FROM Artifact.Windows.System.Powershell.PSReadline()
+
+  - name: Win.WebRootRecent
+    precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: |
+      SELECT FullPath, Size, Mtime, Btime
+      FROM glob(globs=split(string=WinWebRoots, sep=","))
+      WHERE NOT IsDir AND Mtime > now() - RecentDays * 86400
+
+  # ---------------- LINUX ----------------
+  - name: Lin.Processes
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.Pslist()
+
+  - name: Lin.Netstat
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Network.NetstatEnriched()
+
+  - name: Lin.Services
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.Services()
+
+  - name: Lin.Crontab
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.Crontab()
+
+  - name: Lin.Users
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.Users()
+
+  - name: Lin.AuthorizedKeys
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Ssh.AuthorizedKeys()
+
+  - name: Lin.BashHistory
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.BashShell()
+
+  - name: Lin.SSHLogin
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Syslog.SSHLogin()
+
+  - name: Lin.LastLogin
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: SELECT * FROM Artifact.Linux.Sys.LastUserLogin()
+
+  - name: Lin.WebRootRecent
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      SELECT FullPath, Size, Mtime, Btime
+      FROM glob(globs=split(string=WebRoots, sep=","))
+      WHERE NOT IsDir AND Mtime > now() - RecentDays * 86400
+
+  - name: Lin.Persistence.Misc
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      -- ld.so.preload, rc.local, systemd units, profile.d, cron drop-ins, sudoers.d
+      SELECT FullPath, Size, Mtime, hash(path=FullPath).SHA256 AS SHA256
+      FROM glob(globs=[
+        "/etc/ld.so.preload", "/etc/rc.local", "/etc/profile.d/*",
+        "/etc/cron*/**", "/var/spool/cron/**", "/etc/sudoers", "/etc/sudoers.d/*",
+        "/etc/systemd/system/**", "/usr/lib/systemd/system/*.service",
+        "/root/.ssh/*", "/home/*/.ssh/*", "/home/*/.bashrc", "/root/.bashrc"])
+      WHERE NOT IsDir
+
+  - name: Lin.SUID
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      SELECT FullPath, Mode, Mtime, hash(path=FullPath).SHA256 AS SHA256
+      FROM glob(globs=["/usr/**", "/bin/*", "/sbin/*", "/opt/**", "/tmp/**", "/var/tmp/**", "/dev/shm/**"])
+      WHERE Mode =~ "u" AND NOT IsDir  -- setuid
