@@ -19,11 +19,8 @@ jobs:
 
       - name: Create tarball
         run: |
-          # Build in a temp dir, then move into tarball/ so the archive can't include itself
           mkdir -p tarball
-          tar -czf "$RUNNER_TEMP/${{ github.event.repository.name }}.tar.gz" \
-            --exclude='.git' \
-            --exclude='./tarball' \
+          tar -czf "tarball/${{ github.event.repository.name }}.tar.gz" \
             --exclude='*.tar' \
             --exclude='*.tar.gz' \
             --exclude='*.tgz' \
@@ -31,8 +28,7 @@ jobs:
             --exclude='*.tbz2' \
             --exclude='*.tar.xz' \
             --exclude='*.txz' \
-            .
-          mv "$RUNNER_TEMP/${{ github.event.repository.name }}.tar.gz" tarball/
+            five_min_plans
 
       # Only on pushes to main; PRs (esp. from forks) have a read-only token
       - name: Commit tarball to repo
