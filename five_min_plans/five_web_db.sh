@@ -7,7 +7,7 @@ step() { echo; echo "=== $1 ==="; }
 
 TS=$(date +%Y%m%d-%H%M%S)
 DEFAULT_BASE=/root/.cache/.$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)
-echo "Tip: type the same folder you gave basics.sh, so everything is in one place."
+echo "Tip: type the same folder every time (written on paper), so everything is in one place."
 read -r -p "Folder to save copies in (Enter = $DEFAULT_BASE): " BASE
 case "$BASE" in
   "") BASE=$DEFAULT_BASE ;;
@@ -24,7 +24,50 @@ echo "# Commands that undo what webdb.sh changed. Run as root (sudo -i)." > "$UN
 chmod 600 "$UNDO"
 echo "  !! WRITE THIS DOWN: copies and undo commands are in  $SAVE"
 
-step "0. How does the website answer right now?"
+step "0. Save copies first (your undo button)"
+HAVE_TAR=no; command -v tar >/dev/null 2>&1 && HAVE_TAR=yes
+TARSEL=""; [ $HAVE_TAR = yes ] && tar --help 2>/dev/null | grep -q -- '--selinux' && TARSEL="--selinux --xattrs"
+[ $HAVE_TAR = no ] && echo "  (No 'tar' on this box: saving plain folder copies instead of .tgz files.)"
+save_copy() {
+  local name="$1"; shift
+  if [ $HAVE_TAR = yes ]; then
+    tar $TARSEL -czpf "$SAVE/$name.tgz" "$@" 2>/dev/null
+    [ $? -le 1 ] && [ -s "$SAVE/$name.tgz" ] && echo "$SAVE/$name.tgz"
+  else
+    mkdir -p "$SAVE/$name" && cp -a --parents "$@" "$SAVE/$name/" 2>/dev/null && echo "$SAVE/$name"
+  fi
+}
+
+WEBDIRS=""; [ -d /var/www ] && WEBDIRS="/var/www"
+for d in $( { grep -rhiE '^[[:space:]]*DocumentRoot[[:space:]]' /etc/httpd /etc/apache2 2>/dev/null | awk '{print $2}'
+              grep -rhE '^[[:space:]]*root[[:space:]]' /etc/nginx 2>/dev/null | awk '{print $2}'; } | tr -d '";' | sort -u ); do
+  [ -d "$d" ] || continue
+  case "$d" in /var/www|/var/www/*) continue;; esac
+  WEBDIRS="$WEBDIRS $d"
+done
+
+P=$(save_copy etc /etc)
+if [ -n "$P" ]; then echo "  Saved: $P"
+else echo "  !! The /etc backup FAILED. Copy it by hand: sudo cp -a /etc $SAVE/"; fi
+
+if [ -z "$WEBDIRS" ]; then
+  echo "  No website folder found. Skipping the website copy."
+else
+  NEED=$(du -sk $WEBDIRS 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  FREE=$(df -Pk "$SAVE" | awk 'NR==2 {print $4}')
+  if [ "$NEED" -gt $((FREE / 2)) ]; then
+    echo "  !! Website folders are $((NEED/1024)) MB but only $((FREE/1024)) MB of disk is free."
+    echo "     Skipping, so the disk doesn't fill up. Back up the important parts by hand."
+  else
+    P=$(save_copy www $WEBDIRS)
+    if [ -n "$P" ]; then echo "  Saved: $P  ($WEBDIRS, $(du -sh "$P" | cut -f1))"
+    else echo "  !! The website copy FAILED. Copy it by hand: sudo cp -a /var/www $SAVE/"; fi
+  fi
+fi
+chmod -R go-rwx "$SAVE" 2>/dev/null
+echo "  (The database is copied at the start of step 1, once we can sign in to it.)"
+
+step "0b. How does the website answer right now?"
 MYIP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
 code() {
   if command -v curl >/dev/null 2>&1; then
@@ -53,14 +96,6 @@ command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || \
 BEFORE=$(site)
 echo "  Answers now:$BEFORE"
 echo "  (200 = OK. Every later change must keep these exactly the same.)"
-
-WEBDIRS=""; [ -d /var/www ] && WEBDIRS="/var/www"
-for d in $( { grep -rhiE '^[[:space:]]*DocumentRoot[[:space:]]' /etc/httpd /etc/apache2 2>/dev/null | awk '{print $2}'
-              grep -rhE '^[[:space:]]*root[[:space:]]' /etc/nginx 2>/dev/null | awk '{print $2}'; } | tr -d '";' | sort -u ); do
-  [ -d "$d" ] || continue
-  case "$d" in /var/www|/var/www/*) continue;; esac
-  WEBDIRS="$WEBDIRS $d"
-done
 
 step "1. Database (MariaDB / MySQL)"
 CLIENT=$(command -v mariadb || command -v mysql)
@@ -304,6 +339,89 @@ else
   fi
 fi
 
+step "3. Is the website allowed through the firewall?"
+WEBPORTS=$(ss -tlnH 2>/dev/null | awk '{n=split($4,x,":"); p=x[n]} p==80 || p==443 {print p}' | sort -un | tr '\n' ' ')
+if [ -z "$WEBPORTS" ]; then
+  echo "  Nothing is listening on port 80 or 443, so there's nothing to allow."
+  echo "  !! If the store should be up, check the web server: systemctl status httpd"
+elif ufw status 2>/dev/null | grep -q 'Status: active'; then
+  for p in $WEBPORTS; do
+    if ufw status | grep -qE "^$p(/tcp)?[[:space:]].*ALLOW"; then
+      echo "  Port $p: allowed. Good."
+    else
+      echo "  !! Port $p: the web server listens on it, but ufw doesn't allow it."
+      ask "  Allow port $p from anywhere?" && ufw allow "$p/tcp" >/dev/null && {
+        echo "  Allowed."; echo "ufw delete allow $p/tcp" >> "$UNDO"; }
+    fi
+  done
+elif firewall-cmd --state >/dev/null 2>&1; then
+  for p in $WEBPORTS; do
+    svc=http; [ "$p" = 443 ] && svc=https
+    if firewall-cmd -q --query-service=$svc 2>/dev/null || firewall-cmd -q --query-port=$p/tcp 2>/dev/null; then
+      echo "  Port $p ($svc): allowed. Good."
+    else
+      echo "  !! Port $p ($svc): the web server listens on it, but firewalld doesn't allow it."
+      ask "  Allow $svc from anywhere?" && firewall-cmd -q --add-service=$svc && firewall-cmd -q --permanent --add-service=$svc && {
+        echo "  Allowed."; echo "firewall-cmd --remove-service=$svc; firewall-cmd --permanent --remove-service=$svc" >> "$UNDO"; }
+    fi
+  done
+elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -q 'hook input'; then
+  echo "  The firewall is nftables. Check the web ports are in its allow list:"
+  nft list ruleset 2>/dev/null | grep -E 'dport' | sed 's/^[[:space:]]*/    /'
+else
+  echo "  No firewall is on, so nothing blocks the website."
+fi
+
+U=${SUDO_USER:-YOURUSER}
+if [ $HAVE_TAR = yes ]; then
+  R_ALL="tar $TARSEL -xzpf $SAVE/www.tgz -C /"
+  R_ONE="mkdir -p /tmp/r && tar -xzpf $SAVE/www.tgz -C /tmp/r var/www/html/index.php
+  cp /tmp/r/var/www/html/index.php /var/www/html/index.php"
+  R_ETC="mkdir -p /tmp/r && tar -xzpf $SAVE/etc.tgz -C /tmp/r etc/PATH/TO/FILE
+  diff /tmp/r/etc/PATH/TO/FILE /etc/PATH/TO/FILE
+  cp /tmp/r/etc/PATH/TO/FILE /etc/PATH/TO/FILE"
+else
+  R_ALL="cp -a $SAVE/www/var/www/. /var/www/"
+  R_ONE="cp -a $SAVE/www/var/www/html/index.php /var/www/html/index.php"
+  R_ETC="diff $SAVE/etc/etc/PATH/TO/FILE /etc/PATH/TO/FILE
+  cp -a $SAVE/etc/etc/PATH/TO/FILE /etc/PATH/TO/FILE"
+fi
+cat > "$SAVE/notes.txt" <<EOF
+HOW TO RESTORE  (become root first:  sudo -i)
+
+WHOLE WEBSITE (puts back changed and deleted files):
+  $R_ALL
+  restorecon -Rv /var/www          <- Rocky/Red Hat only. Fixes SELinux labels,
+                                      otherwise the site shows "403 Forbidden".
+
+WHOLE WEBSITE, FULL RESET (also removes files the red team ADDED, e.g. webshells):
+  mv /var/www /root/www-hacked-\$(date +%H%M)     <- keep it as evidence
+  $R_ALL
+  restorecon -Rv /var/www          <- Rocky/Red Hat only
+  (The site is down for the few seconds between these commands.)
+
+ONE WEBSITE FILE (e.g. a defaced home page):
+  $R_ONE
+  restorecon -v /var/www/html/index.php      <- Rocky/Red Hat only
+
+DATABASE (as it was when webdb.sh started):
+  mysql < $SAVE/db-before.dump
+  NOTE: this also brings back the database's OLD account passwords.
+        Change them again afterwards.
+
+ONE FILE FROM /etc (look first, then copy):
+  $R_ETC
+
+UNDO ONLY WHAT webdb.sh CHANGED:
+  cat $UNDO        (run its lines from the bottom up)
+
+KEEP A SECOND COPY ON ANOTHER MACHINE (works with the internet closed):
+  On this box:      cp -r $SAVE /home/$U/.c && chown -R $U: /home/$U/.c
+  On the other box: scp -r $U@THIS_BOX_IP:.c ~/copy
+  Then delete /home/$U/.c on this box.
+EOF
+chmod 600 "$SAVE/notes.txt"
+
 step "Done"
 NOW=$(site)
 echo "  Website before:$BEFORE"
@@ -315,6 +433,7 @@ if [ "$NOW" != "$BEFORE" ]; then
   echo "    sudo cat $UNDO"
 fi
 echo "  Moved files:   $SAVE/moved"
+echo "  Restore:       sudo cat $SAVE/notes.txt"
 echo "  Undo commands: sudo cat $UNDO"
 echo
 echo "  Next, by hand (see the Database and Web server panels on your map):"

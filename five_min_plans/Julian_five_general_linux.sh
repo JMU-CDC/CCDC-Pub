@@ -1,4 +1,4 @@
-
+#!/usr/bin/env bash
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin      
 export LC_ALL=C
 unset LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV CDPATH
@@ -11,7 +11,7 @@ TTY=/dev/tty
 if (( ! CHECK )) && ! { : <"$TTY"; } 2>/dev/null; then echo "No terminal for prompts. Use --check."; exit 1; fi
 
 TS=$(date +%Y%m%d-%H%M%S)
-SAVE=/root/ccdc-general-$TS
+SAVE=/root/.bak-$TS
 mkdir -p "$SAVE" && chmod 700 "$SAVE"
 LOG=$SAVE/actions.log; : >"$LOG"
 FW_WAIT=${FW_WAIT:-90}; [[ $FW_WAIT =~ ^[0-9]+$ ]] && (( FW_WAIT >= 30 )) || FW_WAIT=90
@@ -44,7 +44,7 @@ pg_init() {
   [[ -t 1 && -z ${NOPAGER:-} ]] && { : <"$TTY"; } 2>/dev/null || return 0
   local s; s=$(stty size <"$TTY" 2>/dev/null)
   [[ ${s% *} =~ ^[0-9]+$ ]] && (( ${s% *} > 5 )) && PG_ROWS=${s% *}
-  [[ ${s
+  [[ ${s#* } =~ ^[0-9]+$ ]] && (( ${s#* } > 20 )) && PG_COLS=${s#* }
   PG_FILE=$1/.pager-reset; PG_ON=1
 }
 pg_reset() { PG_N=0; [[ -n $PG_FILE ]] && : >"$PG_FILE" 2>/dev/null; }   
@@ -53,7 +53,7 @@ pg_line() {
   (( PG_ON )) || return 0
   [[ -e $PG_FILE ]] && { rm -f "$PG_FILE"; PG_N=0; }
   local plain=${1//$'\e'\[*([0-9;])m/}
-  (( PG_N += 1 + ${
+  (( PG_N += 1 + ${#plain} / PG_COLS ))
   (( PG_N < PG_ROWS - 1 )) && return 0
   local k
   printf '\e[7m-- more --  [Enter/space] next page   [s] skip to next question   [q] stop paging \e[0m' >"$TTY"
@@ -66,12 +66,12 @@ view_file() {
   [[ -s $f ]] || { pg_line "  (empty: $f)"; return; }
   if [[ ! -t 1 ]] || ! { : <"$TTY"; } 2>/dev/null; then cat "$f"; return; fi
   mapfile -t lines < <(sed 's/\t/    /g' "$f" | fold -w "$PG_COLS")
-  n=${
+  n=${#lines[@]}; h=$(( PG_ROWS - 1 ))
   while true; do
     printf '\e[H\e[2J' >"$TTY"
     for (( i = top; i < top + h && i < n; i++ )); do printf '%s\n' "${lines[i]}"; done >"$TTY"
     printf '\e[7m %s  %d-%d/%d  [space]down [b]up [g]top [G]end [/]find [n]next [q]uit \e[0m' \
-      "${f
+      "${f##*/}" $(( top + 1 )) "$i" "$n" >"$TTY"
     read -rsn1 k <"$TTY"
     case $k in
       ""|" "|j|f) (( top + h < n )) && (( top += h )) ;;
@@ -108,7 +108,7 @@ build_pkgdb() {
     esac; } | awk '{ p=$0; if (p ~ /^\/usr\/(bin|sbin|lib|lib32|lib64|libx32)\//) p=substr(p,5); print p }' | sort -u >"$PKGDB"
 }
 unowned() {   
-  (( $
+  (( $# )) || return 0
   [ "$PKG" = none ] && { printf '%s\n' "$@"; return; }
   build_pkgdb
   printf '%s\n' "$@" | awk -v db="$PKGDB" 'BEGIN { while ((getline l < db) > 0) own[l] = 1 }
@@ -158,11 +158,30 @@ echo "Everything this script saves goes to $SAVE (copy it off the box!)"
 
 
 step "0. Back up /etc and system state (your undo button)"
-tar czf "$SAVE/etc-backup.tgz" /etc 2>/dev/null
+BACKUP=""; UNDO=""
+if have tar && have gzip; then
+  tar czf "$SAVE/etc-backup.tgz" /etc 2>/dev/null
+  if (( $? <= 1 )) && [ -s "$SAVE/etc-backup.tgz" ]; then
+    BACKUP=$SAVE/etc-backup.tgz; UNDO="tar xzf $BACKUP -C / etc/PATH/TO/FILE"
+    have restorecon && UNDO+="; restorecon -F /etc/PATH/TO/FILE"
+  else
+    rm -f "$SAVE/etc-backup.tgz"; warn "tar failed; falling back to a plain copy"
+  fi
+else
+  echo "  tar or gzip not installed; using a plain copy of /etc"
+fi
+if [ -z "$BACKUP" ]; then
+  cp -a /etc "$SAVE/etc" 2>/dev/null; rc=$?
+  if [ -d "$SAVE/etc" ]; then
+    BACKUP=$SAVE/etc; UNDO="cp -a $BACKUP/PATH/TO/FILE /etc/PATH/TO/FILE"
+    (( rc )) && warn "copy of /etc is INCOMPLETE (disk full?): check $BACKUP before relying on it"
+  fi
+fi
 { ps auxfww; echo; ss -tulpna; } >"$SAVE/state-before.txt" 2>/dev/null
 have nft && nft list ruleset >"$SAVE/nft-before.txt" 2>/dev/null
 have iptables-save && iptables-save >"$SAVE/iptables-before.txt" 2>/dev/null
-echo "  Saved: $SAVE/etc-backup.tgz and state-before.txt"
+if [ -n "$BACKUP" ]; then echo "  Saved: $BACKUP and state-before.txt"
+else warn "NO BACKUP OF /etc (disk full?). There is no undo for file changes: free space and re-run."; fi
 case $PKG in
   dpkg) nohup nice -n 19 bash -c 'dpkg --verify 2>&1 | awk '"'"'$1 ~ /5/ || ($1=="missing" && $NF !~ /^\/usr\/share\/(doc|man|locale|info)\//)'"'"' >"$1"' _ "$SAVE/integrity.txt" >/dev/null 2>&1 </dev/null & ;;
   rpm)  nohup nice -n 19 bash -c 'rpm -Va 2>&1 | awk '"'"'$1 ~ /5/ || $1=="missing"'"'"' >"$1"' _ "$SAVE/integrity.txt" >/dev/null 2>&1 </dev/null & ;;
@@ -287,14 +306,14 @@ done
 echo "  sudo rules that aren't stock:"
 FOUND=no
 while IFS= read -r line; do
-  f=${line%%:*}; body=${line
+  f=${line%%:*}; body=${line#*:}; body=${body#*:}
   norm=$(tr -s ' \t' ' ' <<<"$body" | sed 's/^ //; s/ $//')
   why=""
   case $norm in
     "") continue ;;
-    [
-    [
-    \
+    [#@]includedir\ /etc/sudoers.d) continue ;;
+    [#@]include*) why="pulls in another file/dir" ;;
+    \#*) continue ;;
     "root ALL=(ALL) ALL"|"root ALL=(ALL:ALL) ALL"|%sudo\ ALL=\(ALL*\)\ ALL|%wheel\ ALL=\(ALL*\)\ ALL|%admin\ ALL=\(ALL*\)\ ALL) continue ;;
     Defaults*) [[ $norm =~ \!authenticate|LD_PRELOAD|LD_LIBRARY_PATH|BASH_ENV ]] && why="Defaults that skip the password / inject code" || continue ;;
     *NOPASSWD*) why="NOPASSWD (root without a password)" ;;
@@ -307,9 +326,9 @@ done < <(grep -HnE '' /etc/sudoers /etc/sudoers.d/* 2>/dev/null)
 
 for f in /etc/sudoers.d/*; do
   [ -f "$f" ] || continue
-  grep -vE '^[[:space:]]*(
+  grep -vE '^[[:space:]]*(#[^i]|#$|$)' "$f" | grep -q . || continue
   [ -z "$(unowned "$f")" ] && ! grep -qE 'NOPASSWD|!authenticate' "$f" && continue
-  echo "  File: $f"; grep -vE '^[[:space:]]*(
+  echo "  File: $f"; grep -vE '^[[:space:]]*(#[^i]|#$|$)' "$f" | indent
   ask "  Move it out of sudoers.d?" || continue
   stash "$f"
   if ! visudo -c >/dev/null 2>&1; then mv -f "$SAVE/quarantine$f" "$f"; warn "sudo config check failed; put back"
@@ -330,7 +349,7 @@ while IFS=: read -r u _ _ _ _ home _; do
     inlist "$f" "${SEEN_KEYS:-}" && continue; SEEN_KEYS="${SEEN_KEYS:-} $f"
     FOUND=yes; echo; echo "  $f  (account $u)"
     case $f in */rc) echo "    (runs on every ssh login as $u)"; head -n 5 "$f" | indent ;;
-               *)    awk '!/^[[:space:]]*(
+               *)    awk '!/^[[:space:]]*(#|$)/ {print substr($0, 1, 40) " ... " $NF}' "$f" | indent ;; esac
     ask "  Move it out (keys stop working)? N if any key is your team's" && stash "$f"
   done
 done < <(getent passwd)
@@ -354,7 +373,7 @@ step "8. Persistence (things that bring the attacker back)"
 mkdir -p "$SAVE/quarantine"; RELOAD=no
 review() {   
   echo; echo "  $2: $1   (changed $(date -r "$1" '+%F %R' 2>/dev/null))"
-  grep -vE '^[[:space:]]*(
+  grep -vE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | head -n 6 | indent
   ask "  Move it out?" && stash "$1"
 }
 
@@ -367,7 +386,7 @@ for f in "${L[@]}"; do
 done
 if [ -f /etc/crontab ] && { [ -n "$(unowned /etc/crontab)" ] || pkg_changed /etc/crontab; }; then
   echo; echo "  /etc/crontab was changed. Jobs (Debian's stock run-parts lines are normal):"
-  grep -vE '^[[:space:]]*(
+  grep -vE '^[[:space:]]*(#|$)|^[A-Z]+=' /etc/crontab | indent; echo "  Edit by hand if needed."
 fi
 have atq && [ -n "$(atq 2>/dev/null)" ] && { echo "  'at' jobs queued (atq; at -c N to read, atrm N to remove):"; atq | indent; }
 
@@ -396,7 +415,7 @@ done < <(find /etc/systemd/system /etc/systemd/user -type l 2>/dev/null)
 [ $RELOAD = yes ] && systemctl daemon-reload 2>/dev/null
 
 for f in /etc/rc.local /etc/rc.d/rc.local; do
-  [ -f "$f" ] && [ ! -L "$f" ] && grep -vE '^[[:space:]]*(
+  [ -f "$f" ] && [ ! -L "$f" ] && grep -vE '^[[:space:]]*(#|$)|^[[:space:]]*(exit 0|touch /var/lock/subsys/local)[[:space:]]*$' "$f" | grep -q . && review "$f" "runs at boot"
 done
 [ -s /etc/ld.so.preload ] && review /etc/ld.so.preload "LOADED INTO EVERY PROGRAM (classic rootkit)"
 mapfile -t L < <(find /etc/profile.d /etc/update-motd.d /etc/ld.so.conf.d /etc/init.d /etc/X11/Xsession.d -maxdepth 1 -type f 2>/dev/null)
@@ -416,15 +435,15 @@ for f in /etc/profile /etc/bash.bashrc /etc/bashrc /etc/environment /root/.bashr
          /home/*/.bashrc /home/*/.bash_profile /home/*/.profile; do
   [ -f "$f" ] || continue
   [ -z "$(unowned "$f")" ] && ! pkg_changed "$f" && continue            
-  x=$(grep -nE "$RE" "$f" | grep -vE '^[0-9]+:[[:space:]]*
+  x=$(grep -nE "$RE" "$f" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE "alias (ls|dir|vdir|grep|fgrep|egrep)='(ls|dir|vdir|grep|fgrep|egrep) --color=auto'")
   [ -n "$x" ] && { echo; echo "  Suspicious lines in $f (edit by hand):"; indent <<<"$x"; }
 done
 
 
 
-x=$(grep -HnE '^[[:space:]]*-?auth[[:space:]]+[^
+x=$(grep -HnE '^[[:space:]]*-?auth[[:space:]]+[^#]*pam_permit\.so' /etc/pam.d/* 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*-?auth[[:space:]]+required[[:space:]]+pam_permit')
 [ -n "$x" ] && { echo; warn "PAM accepts ANY password here (fix by hand, keep a root shell open):"; indent <<<"$x"; }
-x=$(grep -HnE '^[^
+x=$(grep -HnE '^[^#]*pam_exec\.so' /etc/pam.d/* 2>/dev/null)
 [ -n "$x" ] && { echo; warn "PAM runs a program at login (can steal passwords):"; indent <<<"$x"; }
 mapfile -t L < <(find /lib/*/security /usr/lib/*/security /lib64/security /usr/lib64/security -maxdepth 1 -name '*.so' 2>/dev/null)
 x=$(unowned "${L[@]}" | tr '\n' ' ')
@@ -437,7 +456,7 @@ step "9. SSH server settings"
 
 
 CFG=/etc/ssh/sshd_config
-MARK="
+MARK="# --- 5_Min_Plan_Linux_General.sh ---"
 if [ ! -f "$CFG" ]; then echo "  No SSH server config. Skipping."
 else
   x=$(awk 'FNR==1{m=0} tolower($1)=="match"{m=1; h=$0; next}
@@ -549,22 +568,22 @@ fi
 step "11. Report (read-only)"
 R=$SAVE/report.txt
 {
-  echo "
-  echo; echo "
-  echo; echo "
-  echo; echo "
+  echo "## IP addresses"; ip -br addr 2>/dev/null
+  echo; echo "## Listening ports"; ss -tulpn 2>/dev/null
+  echo; echo "## Established connections (shells/interpreters here = reverse shell)"; ss -tunp state established 2>/dev/null
+  echo; echo "## SUID/SGID files no package installed (each one = possible root shell)"
   mapfile -t L < <(find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null); unowned "${L[@]}"
-  echo; echo "
+  echo; echo "## Files with root-level capabilities (same danger as SUID)"
   have getcap && getcap -r /usr /opt /home 2>/dev/null | grep -E 'cap_(setuid|setgid|dac_override|dac_read_search|sys_admin|sys_ptrace|sys_module)' || echo "(getcap not installed or none)"
-  echo; echo "
+  echo; echo "## Immutable files (chattr +i makes your fixes fail; chattr -i FILE)"
   lsattr -Ra /etc /root 2>/dev/null | awk '$1 ~ /^[-a-zA-Z]+$/ && $1 ~ /i/ {print $2}'
-  echo; echo "
+  echo; echo "## Files in system bin dirs no package installed"
   mapfile -t L < <(find /usr/bin /usr/sbin /bin /sbin -maxdepth 1 -type f 2>/dev/null | sort -u); unowned "${L[@]}"
-  echo; echo "
-  echo; echo "
-  echo; echo "
-  echo; echo "
-  echo; echo "
+  echo; echo "## /usr/local (never from a package)"; find /usr/local/bin /usr/local/sbin -maxdepth 1 -type f 2>/dev/null
+  echo; echo "## /etc/ld.so.preload (should NOT exist)"; cat /etc/ld.so.preload 2>/dev/null || echo "not present - good"
+  echo; echo "## Kernel taint (non-zero = out-of-tree module)"; cat /proc/sys/kernel/tainted
+  echo; echo "## Systemd timers"; systemctl list-timers --all --no-pager 2>/dev/null
+  echo; echo "## Package integrity (changed package files; written by the background job)"; echo "see $SAVE/integrity.txt"
 } >"$R" 2>&1
 echo "  Saved: $R   (read it: sudo less $R)"
 echo "  Blind spots: a kernel rootkit or a trojaned ps/ss can hide from ALL of this."
@@ -573,7 +592,7 @@ echo "  Package checks trust the package database, which root can rewrite."
 echo
 echo "Finished. Everything saved in $SAVE  (actions: $LOG)"
 echo "Copy it OFF this box now: red team can wipe it."
-echo "Undo a file:  tar xzf $SAVE/etc-backup.tgz -C / etc/PATH/TO/FILE"
+[ -n "$UNDO" ] && echo "Undo a file:  $UNDO" || warn "No /etc backup was made, so there is no undo."
 
 
 if [[ -t 1 ]] && { : <"$TTY"; } 2>/dev/null; then
