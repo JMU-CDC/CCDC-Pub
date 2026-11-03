@@ -1,33 +1,33 @@
-#!/usr/bin/env bash
-# =============================================================================
-#  webmail-5min.sh - MACCDC first-5-minutes script for a Fedora webmail box
-#                    (Postfix + Dovecot + Apache/PHP webmail such as Roundcube)
-#
-#  Run as root:   bash webmail-5min.sh              scan, then hardening menu
-#                 bash webmail-5min.sh --scan-only  read-only scan + flag list
-#
-#  Ground rules this script keeps:
-#    * The scan is read-only. It only writes its own report folder
-#      ($CCDC_DIR, default /root/.ccdc/<timestamp>).
-#    * Nothing on the system changes unless you answer "y". Prompts default to No.
-#    * You type every password into passwd / chpasswd / mysql's own prompts.
-#      The script never sees, stores or prints them.
-#    * Nothing is deleted. "Removed" files are moved to a quarantine folder.
-#    * Firewall changes roll back on their own after ROLLBACK_SECS (default 60)
-#      unless you type "keep". The rollback survives a dropped SSH session.
-#
-#  THE 5-MINUTE PLAN
-#    0:00  Log in on the console. Run the script. Accept the backup prompt.
-#    0:30  Scan runs (about 1 min). Read the FLAG SUMMARY.
-#    1:30  [1] Passwords: root and your admin first. Change scored mail users
-#              only with a Password Change Request (PCR) to the White Team.
-#    2:00  [2] Kill flagged shells/sessions   [3] Accounts, sudo, SSH keys
-#    2:45  [4] Firewall allowlist (auto-rollback)
-#    3:30  [5] Postfix relay/BCC/forwards     [6] Dovecot auth backdoors
-#    4:15  [7] Webmail installer/webshells    [8] Cron/systemd persistence
-#    4:45  [v] Verify SMTP/POP3/IMAP/HTTP still answer. Copy the report
-#              folder off the box. Then work the rest of the menu.
-# =============================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 VERSION=1.0
 BASE_DIR=${CCDC_DIR:-/root/.ccdc}
@@ -43,13 +43,13 @@ BACKUP=$OUT/backup
 TTY=/dev/tty
 EDITOR_CMD=${EDITOR:-vi}
 
-# TCP ports a webmail box is expected to serve. Any other port listening on a
-# non-loopback address gets flagged.
+
+
 MAIL_PORTS="22 25 80 110 143 443 465 587 993 995 4190"
 UDP_OK="68 123 323 546"
 CORE_SVCS="postfix dovecot httpd"
 
-# Strings that show up in PHP webshells, not in normal webmail code.
+
 WEBSHELL_RE='eval *\( *(base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|hex2bin|\$_(GET|POST|REQUEST|COOKIE|SERVER))|(system|passthru|shell_exec|exec|popen|proc_open|pcntl_exec|assert|create_function) *\( *\$_(GET|POST|REQUEST|COOKIE|SERVER)|\$_(GET|POST|REQUEST|COOKIE)\[[^]]{0,40}\] *\(|base64_decode *\( *\$_(GET|POST|REQUEST|COOKIE)|` *\$_(GET|POST|REQUEST|COOKIE)|gzinflate *\( *base64_decode|move_uploaded_file *\( *\$_FILES|FilesMan|b374k|weevely|p0wny|c99shell|r57shell'
 
 if [[ -t 1 ]]; then
@@ -58,7 +58,7 @@ else
   R=; Y=; G=; B=; N=
 fi
 
-# ---- state collected by the scan, used by the menu ---------------------------
+
 FLAGS=(); SECTION=""
 declare -A EXE
 UID0_USERS=(); EMPTY_PW_USERS=(); SHELL_USERS=(); SYS_SHELL_USERS=(); HUMAN_USERS=()
@@ -72,7 +72,7 @@ RC_INSTALLER_ON=0; RC_DESKEY_DEFAULT=0; RC_CONF_WORLD=0; SQM_FOUND=0
 ALIAS_FLAG=0; PRELOAD_FLAG=0; CRONTAB_FLAG=0; RCLOCAL_FLAG=0; RCLOCAL_FILE=""
 SSH_AKF_FLAG=0; SSH_AKC_FLAG=0; DC_PWLOG=0
 
-# ---- output helpers ------------------------------------------------------------
+
 rep()     { printf '%s\n' "$*" >>"$REPORT"; }
 section() { SECTION=$1; printf '\n%s=== %s ===%s\n' "$B" "$1" "$N"; rep ""; rep "=== $1 ==="; }
 hdr()     { printf '\n%s--- %s ---%s\n' "$B" "$1" "$N"; rep ""; rep "--- $1 ---"; }
@@ -81,24 +81,24 @@ good()    { printf '  %s[ok]%s %s\n' "$G" "$N" "$*"; rep "  [ok] $*"; }
 note()    { printf '  %s[i]%s %s\n' "$Y" "$N" "$*"; rep "  [i] $*"; }
 flag()    { FLAGS+=("[$SECTION] $*"); printf '  %s[!]%s %s\n' "$R" "$N" "$*"; rep "  [!] $*"; }
 warn()    { printf '  %s[!]%s %s\n' "$R" "$N" "$*"; rep "  [!] $*"; }
-show()    { sed 's/^/      /' | cut -c1-220 | tee -a "$REPORT"; }    # indent stdin to screen + report
-act()     { printf '%s  %s\n' "$(date '+%F %T')" "$*" >>"$ACTLOG"; }   # every change lands here
+show()    { sed 's/^/      /' | cut -c1-220 | tee -a "$REPORT"; }    
+act()     { printf '%s  %s\n' "$(date '+%F %T')" "$*" >>"$ACTLOG"; }   
 have()    { command -v "$1" >/dev/null 2>&1; }
 
-# ---- prompts (always read the terminal, never stdin) --------------------------
-confirm() {          # y/N, default No
+
+confirm() {          
   local a
   read -r -p "  ${Y}?${N} $1 [y/N] " a <"$TTY" || { echo; return 1; }
   [[ $a == [yY]* ]]
 }
-confirm_yes() {      # Y/n, only for non-invasive steps (backups)
+confirm_yes() {      
   local a
   read -r -p "  ${Y}?${N} $1 [Y/n] " a <"$TTY" || { echo; return 1; }
   [[ -z $a || $a == [yY]* ]]
 }
 EACH_ALL=0; EACH_STOP=0
 each_reset() { EACH_ALL=0; EACH_STOP=0; }
-each() {             # per-item prompt for lists: y / N / a = yes to the rest / q = skip the rest
+each() {             
   (( EACH_ALL )) && return 0
   (( EACH_STOP )) && return 1
   local a
@@ -110,21 +110,21 @@ each() {             # per-item prompt for lists: y / N / a = yes to the rest / 
   esac
   return 1
 }
-ask() {              # ask "prompt" -> prints the answer
+ask() {              
   local a
   read -r -p "$1" a <"$TTY" || return 1
   printf '%s' "$a"
 }
-on_tty() { "$@" <"$TTY" >"$TTY" 2>&1; }      # passwd, vi, visudo, curl -u ...
-edit() {             # edit <file>; returns 0 only if the file changed
+on_tty() { "$@" <"$TTY" >"$TTY" 2>&1; }      
+edit() {             
   local f=$1 before
   before=$(md5sum <"$f" 2>/dev/null)
-  # shellcheck disable=SC2086  # EDITOR may carry flags
+  
   on_tty $EDITOR_CMD "$f"
   if [[ $(md5sum <"$f" 2>/dev/null) != "$before" ]]; then act "EDITED $f"; return 0; fi
   return 1
 }
-quarantine() {       # move a file/dir into $QUAR keeping its full path; never deletes
+quarantine() {       
   local f=$1 dest=$QUAR$1
   mkdir -p "$(dirname "$dest")"
   if mv -f -- "$f" "$dest" 2>/dev/null; then
@@ -134,14 +134,14 @@ quarantine() {       # move a file/dir into $QUAR keeping its full path; never d
   fi
 }
 
-# ---- small utilities -----------------------------------------------------------
-unowned() {          # print the arguments that no RPM package owns
-  (( $# )) || return 0
+
+unowned() {          
+  (( $
   printf '%s\0' "$@" | xargs -0 rpm -qf 2>&1 | sed -n 's/^file \(.*\) is not owned by any package$/\1/p'
 }
 real_dirs()   { local d; for d in "$@"; do [[ -d $d ]] && readlink -f "$d"; done | sort -u; }
 unit_exists() { systemctl list-unit-files "$1.service" 2>/dev/null | grep -q "^$1\.service"; }
-svc_state() {        # systemd state, or a process check where systemd isn't running
+svc_state() {        
   local s
   if [[ -d /run/systemd/system ]]; then s=$(systemctl is-active "$1" 2>/dev/null); echo "${s:-unknown}"; return; fi
   case $1 in postfix) s=master ;; mariadb|mysqld|mysql) s='mariadbd|mysqld' ;; *) s=$1 ;; esac
@@ -149,10 +149,10 @@ svc_state() {        # systemd state, or a process check where systemd isn't run
 }
 ver_lt()      { [[ $1 != "$2" && $(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1) == "$1" ]]; }
 sshv()        { awk -v k="$1" 'tolower($1)==k { $1=""; sub(/^ +/, ""); print; exit }' <<<"$SSHD_T"; }
-pcn()         { postconf -n "$1" 2>/dev/null | sed 's/^[^=]*= *//'; }   # only explicitly-set postfix params
-pch()         { postconf -xh "$1" 2>/dev/null || postconf -h "$1" 2>/dev/null; }  # value with $vars expanded (-x: postfix 2.10+)
+pcn()         { postconf -n "$1" 2>/dev/null | sed 's/^[^=]*= *//'; }   
+pch()         { postconf -xh "$1" 2>/dev/null || postconf -h "$1" 2>/dev/null; }  
 pfmaps()      { grep -oE '(hash|lmdb|btree|cdb|dbm|texthash|regexp|pcre|cidr):/[^ ,]+' <<<"$1"; }
-relay_ok() {         # does a restriction list reach *_unauth_destination before a bare "permit"?
+relay_ok() {         
   local t
   for t in ${1//,/ }; do
     [[ $t == permit ]] && return 1
@@ -161,16 +161,16 @@ relay_ok() {         # does a restriction list reach *_unauth_destination before
   return 1
 }
 keys_summary() {
-  awk '/^[[:space:]]*(#|$)/ { next }
+  awk '/^[[:space:]]*(
        { for (i = 1; i <= NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/) {
            c = ""; for (j = i + 2; j <= NF; j++) c = c " " $j
            print $i c ((i > 1) ? "   [options: " $1 "]" : ""); next }
          print "unparsed: " substr($0, 1, 80) }' "$1"
 }
 
-# ---- auto-rollback for firewall changes ---------------------------------------
+
 RB_CMD=""; RB_PIDFILE=""
-arm_rollback() {     # run "$1" after ROLLBACK_SECS unless disarmed; detached from this terminal
+arm_rollback() {     
   RB_CMD=$1; RB_PIDFILE=$OUT/rollback.pid
   rm -f "$RB_PIDFILE"
   nohup setsid bash -c 'echo $$ >"$1"; sleep "$2"; eval "$3"; echo "$(date "+%F %T")  AUTO-ROLLBACK ran: $3" >>"$4"' \
@@ -185,7 +185,7 @@ disarm_rollback() {
   [[ -n $p ]] && { kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; }
   rm -f "$RB_PIDFILE"
 }
-keep_or_rollback() { # $1 = command that makes the change permanent
+keep_or_rollback() { 
   local a t=$(( ROLLBACK_SECS - 10 ))
   printf '\n  %sCheck from another machine now: does SSH still work? is scoring still green?%s\n' "$Y" "$N"
   if read -r -t "$t" -p "  Type 'keep' within ${t}s to keep it (anything else or timeout = roll back): " a <"$TTY" && [[ $a == keep ]]; then
@@ -198,9 +198,9 @@ keep_or_rollback() { # $1 = command that makes the change permanent
   fi
 }
 
-# =============================================================================
-#  SCAN (read-only)
-# =============================================================================
+
+
+
 scan_system() {
   section "System"
   local os h
@@ -211,7 +211,7 @@ scan_system() {
   info "IPv4: $(ip -4 -o addr show 2>/dev/null | awk '$2!="lo"{printf "%s=%s  ", $2, $4}')"
   info "Default route: $(ip route show default 2>/dev/null | head -n1)"
   info "DNS servers: $(awk '/^nameserver/{printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
-  h=$(grep -vE '^[[:space:]]*(#|$)' /etc/hosts 2>/dev/null | grep -vE '^[[:space:]]*(127\.|::1|fe00::|ff0[0-9]::)')
+  h=$(grep -vE '^[[:space:]]*(
   if [[ -n $h ]]; then note "/etc/hosts has custom entries (check for hijacked names):"; show <<<"$h"; fi
 }
 
@@ -220,13 +220,13 @@ scan_accounts() {
   local u pw uid shell lc st line f body norm table="" files=() pdirs=()
 
   mapfile -t UID0_USERS < <(awk -F: '$3==0 && $1!="root"{print $1}' /etc/passwd)
-  if (( ${#UID0_USERS[@]} )); then flag "UID 0 accounts besides root: ${UID0_USERS[*]}"; else good "only root has UID 0"; fi
+  if (( ${
 
   line=$(cut -d: -f3 /etc/passwd | sort | uniq -d | grep -vx 0 | tr '\n' ' ')
   [[ -n ${line// } ]] && flag "duplicate UIDs: $line"
 
   mapfile -t EMPTY_PW_USERS < <(awk -F: '$2==""{print $1}' /etc/shadow 2>/dev/null)
-  (( ${#EMPTY_PW_USERS[@]} )) && flag "EMPTY password (no password needed to log in): ${EMPTY_PW_USERS[*]}"
+  (( ${
 
   line=$( { find /etc/shadow /etc/gshadow -perm /o+r; find /etc/passwd /etc/group /etc/shadow /etc/sudoers -perm /go+w; } 2>/dev/null | sort -u | tr '\n' ' ')
   [[ -n ${line// } ]] && flag "bad permissions on: $line"
@@ -255,32 +255,32 @@ scan_accounts() {
     [[ -n $line ]] && info "group $u: $line"
   done
 
-  # sudo: anything beyond the stock root/%wheel rules
+  
   SUDO_FLAG_FILES=()
   while IFS= read -r line; do
-    f=${line%%:*}; body=${line#*:*:}
+    f=${line%%:*}; body=${line
     norm=$(tr -s ' \t' ' ' <<<"$body" | sed 's/^ //; s/ $//')
     case $norm in
       "root ALL=(ALL) ALL"|"root ALL=(ALL:ALL) ALL"|"%wheel ALL=(ALL) ALL"|"%wheel ALL=(ALL:ALL) ALL") continue ;;
     esac
     if [[ $norm == *NOPASSWD* ]]; then flag "sudo NOPASSWD rule: $line"; else flag "non-default sudo rule: $line"; fi
     [[ $f == /etc/sudoers.d/* && " ${SUDO_FLAG_FILES[*]} " != *" $f "* ]] && SUDO_FLAG_FILES+=("$f")
-  done < <(grep -HnvE '^[[:space:]]*(#|$)|^[[:space:]]*(Defaults|@include)' /etc/sudoers /etc/sudoers.d/* 2>/dev/null)
+  done < <(grep -HnvE '^[[:space:]]*(
   while IFS= read -r f; do
     flag "sudoers file not from any package: $f"
     [[ " ${SUDO_FLAG_FILES[*]} " != *" $f "* ]] && SUDO_FLAG_FILES+=("$f")
   done < <(unowned /etc/sudoers.d/*)
 
-  # PAM backdoors
-  line=$(grep -HnE '^[[:space:]]*-?auth[[:space:]]+[^#]*pam_permit\.so' /etc/pam.d/* 2>/dev/null)
+  
+  line=$(grep -HnE '^[[:space:]]*-?auth[[:space:]]+[^
   [[ -n $line ]] && { flag "PAM auth line uses pam_permit (accepts ANY password):"; show <<<"$line"; }
-  line=$(grep -HnE '^[^#]*pam_exec\.so' /etc/pam.d/* 2>/dev/null)
+  line=$(grep -HnE '^[^
   [[ -n $line ]] && { flag "PAM pam_exec runs a program at login (can capture passwords):"; show <<<"$line"; }
   mapfile -t files < <(find /etc/pam.d -maxdepth 1 -type f 2>/dev/null)
   line=$(unowned "${files[@]}" | tr '\n' ' ')
   [[ -n ${line// } ]] && flag "PAM config files not from any package: $line"
   mapfile -t pdirs < <(real_dirs /usr/lib64/security /lib64/security /usr/lib/security /lib/security)
-  if (( ${#pdirs[@]} )); then
+  if (( ${
     mapfile -t files < <(find "${pdirs[@]}" -maxdepth 1 -type f -name '*.so' 2>/dev/null)
     line=$(unowned "${files[@]}" | tr '\n' ' ')
     [[ -n ${line// } ]] && flag "PAM modules not from any package (backdoor?): $line"
@@ -294,7 +294,7 @@ scan_ssh() {
     SSHD_T=$(sshd -T 2>/dev/null)
     if [[ -z $SSHD_T ]]; then
       note "sshd -T failed; reading sshd_config directly (first match wins)"
-      SSHD_T=$(grep -hvE '^[[:space:]]*(#|$)' /etc/ssh/sshd_config 2>/dev/null)
+      SSHD_T=$(grep -hvE '^[[:space:]]*(
     fi
     v=$(sshv permitrootlogin)
     case $v in
@@ -327,9 +327,9 @@ scan_ssh() {
       [[ -s $f && " ${AUTH_KEYS[*]} " != *" $f "* ]] && AUTH_KEYS+=("$f")
     done
   done < <(getent passwd)
-  (( ${#AUTH_KEYS[@]} )) || good "no authorized_keys files"
+  (( ${
   for f in "${AUTH_KEYS[@]}"; do
-    flag "SSH keys in $f ($(grep -cvE '^[[:space:]]*(#|$)' "$f") key(s)): whoever holds them gets in"
+    flag "SSH keys in $f ($(grep -cvE '^[[:space:]]*(
     keys_summary "$f" | show
   done
 }
@@ -340,7 +340,7 @@ scan_network() {
   local proto laddr proc port addr pname pid desc line est
   while read -r proto _ _ _ laddr _ proc; do
     [[ $proto == tcp || $proto == udp ]] || continue
-    port=${laddr##*:}; addr=${laddr%:*}
+    port=${laddr
     pname=$(grep -o '"[^"]*"' <<<"$proc" | head -n1 | tr -d '"')
     pid=$(grep -o 'pid=[0-9]*' <<<"$proc" | head -n1 | cut -d= -f2)
     desc=$(printf '%-3s %-26s %s[%s]' "$proto" "$laddr" "${pname:-?}" "${pid:-?}")
@@ -412,13 +412,13 @@ scan_procs() {
   local re_rtun='(^|[/[:space:]])ssh[[:space:]].*-[a-zA-Z]*R[[:space:]]'
   local re_tools='msfconsole|meterpreter|sliver|chisel|ligolo|gs-netcat|gsocket|frpc|xmrig|minerd|pspy|linpeas|reptile'
 
-  while IFS=$'\t' read -r d exe; do EXE[${d#/proc/}]=$exe; done \
+  while IFS=$'\t' read -r d exe; do EXE[${d
     < <(find /proc -mindepth 2 -maxdepth 2 -name exe -printf '%h\t%l\n' 2>/dev/null)
 
   while read -r pid user args; do
     [[ $pid == "$$" || $pid == "$BASHPID" ]] && continue
     exe=${EXE[$pid]}
-    [[ -z $exe ]] && continue                      # kernel thread
+    [[ -z $exe ]] && continue                      
     comm=""; read -r comm 2>/dev/null <"/proc/$pid/comm"
     why=""
     case $exe in
@@ -452,7 +452,7 @@ scan_procs() {
       flag "PID $pid ($user) $why: ${args:0:150}"
     fi
   done < <(ps -eo pid=,user:32=,args= 2>/dev/null)
-  (( ${#SUS_PROCS[@]} )) || good "no suspicious processes matched"
+  (( ${
 
   section "Logged-in sessions"
   local w
@@ -468,15 +468,15 @@ scan_persistence() {
   CRON_FLAG_FILES=()
   for f in /var/spool/cron/* /var/spool/cron/crontabs/*; do
     [[ -f $f ]] || continue
-    flag "user crontab $f:"; grep -vE '^[[:space:]]*(#|$)' "$f" | show
+    flag "user crontab $f:"; grep -vE '^[[:space:]]*(
     CRON_FLAG_FILES+=("$f")
   done
-  line=$(grep -vE '^[[:space:]]*(#|$)|^[[:space:]]*(SHELL|PATH|MAILTO|HOME)=' /etc/crontab 2>/dev/null)
+  line=$(grep -vE '^[[:space:]]*(
   if [[ -n $line ]]; then flag "/etc/crontab has jobs:"; show <<<"$line"; CRONTAB_FLAG=1; fi
   mapfile -t files < <(find /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly -maxdepth 1 -type f 2>/dev/null)
   while IFS= read -r f; do
     flag "cron file not from any package: $f"
-    grep -vE '^[[:space:]]*(#|$)' "$f" | head -n 5 | show
+    grep -vE '^[[:space:]]*(
     CRON_FLAG_FILES+=("$f")
   done < <(unowned "${files[@]}")
   if have atq; then
@@ -487,7 +487,7 @@ scan_persistence() {
   UNIT_FLAG_FILES=()
   mapfile -t dirs < <(real_dirs /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system /run/systemd/system \
                                 /etc/systemd/user /usr/lib/systemd/user /root/.config/systemd/user /home/*/.config/systemd/user)
-  if (( ${#dirs[@]} )); then
+  if (( ${
     mapfile -t files < <(find "${dirs[@]}" -type f \( -name '*.service' -o -name '*.timer' -o -name '*.socket' \
                            -o -name '*.path' -o -name '*.conf' \) 2>/dev/null | sort -u)
     while IFS= read -r f; do
@@ -500,7 +500,7 @@ scan_persistence() {
 
   for f in /etc/rc.d/rc.local /etc/rc.local; do
     [[ -f $f && ! -L $f ]] || continue
-    line=$(grep -vE '^[[:space:]]*(#|$)|^[[:space:]]*(touch /var/lock/subsys/local|exit 0)[[:space:]]*$' "$f")
+    line=$(grep -vE '^[[:space:]]*(
     [[ -n $line ]] && { flag "$f runs commands at boot:"; show <<<"$line"; RCLOCAL_FLAG=1; RCLOCAL_FILE=$f; }
   done
 
@@ -510,15 +510,15 @@ scan_persistence() {
     good "/etc/ld.so.preload empty/absent"
   fi
 
-  # shell startup files: trojan aliases, callbacks, keyloggers
+  
   SHELLRC_FLAG_FILES=()
   re='alias[[:space:]]+(sudo|su|ls|ps|ss|netstat|passwd|cat|top|lsof|who|w|kill|id|grep|find|systemctl)=|/dev/tcp|(^|[;&|[:space:]])(nc|ncat|socat)[[:space:]]|curl[[:space:]]|wget[[:space:]]|base64[[:space:]]+-d|PROMPT_COMMAND|trap[[:space:]].*DEBUG|LD_PRELOAD'
   for f in /etc/profile /etc/bashrc /etc/environment /etc/profile.d/*.sh /root/.bashrc /root/.bash_profile \
            /root/.profile /root/.bash_logout /home/*/.bashrc /home/*/.bash_profile /home/*/.profile /home/*/.bash_logout; do
     [[ -f $f ]] || continue
-    line=$(grep -nE "$re" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#')
+    line=$(grep -nE "$re" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*
     [[ -z $line ]] && continue
-    # a stock, unmodified package file (e.g. Fedora's /etc/bashrc PROMPT_COMMAND) is fine
+    
     if rpm -qf "$f" >/dev/null 2>&1 && ! rpm -Vf "$f" 2>/dev/null | grep -q " $f\$"; then continue; fi
     flag "suspicious line(s) in $f:"; show <<<"$line"; SHELLRC_FLAG_FILES+=("$f")
   done
@@ -526,11 +526,11 @@ scan_persistence() {
   line=$(unowned "${files[@]}" | tr '\n' ' ')
   [[ -n ${line// } ]] && flag "/etc/profile.d files not from any package: $line"
 
-  # chattr +i is how red team makes your fixes fail
+  
   mapfile -t IMMUTABLE_FILES < <(
     { lsattr -Ra /etc /root /var/spool/cron 2>/dev/null; lsattr -a /usr/bin /usr/sbin /tmp /var/tmp 2>/dev/null; } |
       awk '$1 ~ /^[-a-zA-Z]+$/ && $1 ~ /i/ { $1 = ""; sub(/^ /, ""); print }' | grep -vE '/\.\.?$')
-  if (( ${#IMMUTABLE_FILES[@]} )); then
+  if (( ${
     flag "immutable (chattr +i) files; edits and password changes on them will fail:"
     printf '%s\n' "${IMMUTABLE_FILES[@]}" | show
   fi
@@ -538,7 +538,7 @@ scan_persistence() {
   mapfile -t TMP_FLAG_FILES < <(find /tmp /var/tmp /dev/shm -xdev -type f \( -perm /111 -o -name '.*' -o -name '*.sh' \
       -o -name '*.py' -o -name '*.pl' -o -name '*.php' -o -name '*.elf' -o -name '*.so' \) 2>/dev/null |
       grep -vE '^/tmp/\.X[0-9]+-lock$' | head -n 50)
-  if (( ${#TMP_FLAG_FILES[@]} )); then
+  if (( ${
     flag "executable / hidden / script files in temp dirs:"
     for f in "${TMP_FLAG_FILES[@]}"; do ls -la "$f" 2>/dev/null; done | show
   fi
@@ -553,7 +553,7 @@ scan_integrity() {
     rpm -q --quiet "$p" 2>/dev/null && pkgs+=("$p")
   done
   v=$(rpm -V "${pkgs[@]}" 2>/dev/null)
-  # (a quarantined Roundcube installer/ shows up as "missing"; that one is expected)
+  
   line=$(awk '($1 ~ /5/ || $1 == "missing") && $2 !~ /^[cdglr]$/ && !($1 == "missing" && $NF ~ /roundcubemail\/installer/)' <<<"$v")
   if [[ -n $line ]]; then flag "package files whose content changed (possible trojans):"; show <<<"$line"
   else good "no changed binaries in: ${pkgs[*]}"; fi
@@ -587,7 +587,7 @@ scan_integrity() {
     flag "SUID/SGID on $f: any user can become root with it"
     [[ " ${SUID_FLAG_FILES[*]} " == *" $f "* ]] || SUID_FLAG_FILES+=("$f")
   done
-  info "${#files[@]} SUID/SGID files in total (full list in the report)"
+  info "${
   printf '%s\n' "${files[@]}" >>"$REPORT"
 
   section "Kernel modules"
@@ -599,7 +599,7 @@ scan_integrity() {
       fi
       modinfo -F filename "$m" >/dev/null 2>&1 || nomod+=("$m")
     done < <(lsmod 2>/dev/null)
-    (( ${#nomod[@]} )) && flag "loaded modules with no file in the module tree (insmod'ed from elsewhere?): ${nomod[*]}"
+    (( ${
   else
     note "no /lib/modules/$(uname -r) (kernel updated without reboot?) - module check skipped"
   fi
@@ -620,7 +620,7 @@ scan_postfix() {
     case $tok in
       0.0.0.0*|::/0|*/0) flag "mynetworks contains $tok: OPEN RELAY (anyone can send mail through you)" ;;
       127.*|::1|::1/128|::ffff:127.0.0.0/104) ;;
-      */*) [[ ${tok##*/} =~ ^[0-9]+$ && $tok == *.* ]] && (( ${tok##*/} < 24 )) && \
+      */*) [[ ${tok
              flag "mynetworks contains wide range $tok (every host in it can relay)" ;;
     esac
   done
@@ -643,9 +643,9 @@ scan_postfix() {
   PF_MAP_FLAG_FILES=()
   for p in sender_bcc_maps recipient_bcc_maps header_checks body_checks virtual_alias_maps transport_maps; do
     for m in $(pfmaps "$(pcn "$p")"); do
-      t=${m%%:*}; f=${m#*:}
+      t=${m%%:*}; f=${m
       [[ -f $f ]] || continue
-      line=$(grep -vE '^[[:space:]]*(#|$)' "$f" | head -n 15)
+      line=$(grep -vE '^[[:space:]]*(
       [[ -z $line ]] && continue
       info "$p -> $f:"; show <<<"$line"
       if [[ $p == *bcc* ]] || grep -qiE '[[:space:]](REDIRECT|BCC|FILTER)[[:space:]]' "$f"; then
@@ -655,13 +655,13 @@ scan_postfix() {
   done
 
   if [[ -f /etc/postfix/master.cf ]]; then
-    for v in $(awk '/^[^#[:space:]]/ && $2 == "inet" {print $1}' /etc/postfix/master.cf); do
+    for v in $(awk '/^[^
       case $v in
         smtp|submission|smtps|submissions|25|465|587|127.0.0.1:*|localhost:*|\[::1\]:*) ;;
         *) flag "extra Postfix SMTP listener in master.cf: $v" ;;
       esac
     done
-    line=$(grep -nE 'argv=' /etc/postfix/master.cf | grep -vE '^[0-9]+:[[:space:]]*#')
+    line=$(grep -nE 'argv=' /etc/postfix/master.cf | grep -vE '^[0-9]+:[[:space:]]*
     if [[ -n $line ]]; then
       info "master.cf pipe commands:"; show <<<"$line"
       grep -qE 'argv=(/tmp|/var/tmp|/dev/shm|/home|/root)|argv=[^ ]*/(bash|sh|python[0-9.]*|perl|nc|ncat|socat)( |$)' <<<"$line" && \
@@ -670,12 +670,12 @@ scan_postfix() {
   fi
 
   for m in $( { pfmaps "$(postconf -h alias_maps 2>/dev/null)"; echo hash:/etc/aliases; } | sort -u); do
-    f=${m#*:}
+    f=${m
     [[ -f $f && $seen != *" $f "* ]] || continue
     seen+="$f "
-    line=$(grep -nE '^[^#]*(\||:include:)' "$f")
+    line=$(grep -nE '^[^
     [[ -n $line ]] && { flag "$f pipes mail into commands/includes:"; show <<<"$line"; ALIAS_FLAG=1; }
-    line=$(grep -nE '^[^#]*:.*@' "$f")
+    line=$(grep -nE '^[^
     [[ -n $line ]] && { flag "$f forwards mail to other addresses:"; show <<<"$line"; ALIAS_FLAG=1; }
   done
 
@@ -728,7 +728,7 @@ scan_dovecot() {
 
   for f in $(grep -E '^[[:space:]]*(args|passwd_file_path) = ' <<<"$pb" | grep -oE '/[^ ]+'); do
     [[ -f $f ]] || continue
-    info "passwd-file $f: $(grep -cvE '^[[:space:]]*(#|$)' "$f") users, mode $(stat -c '%a %U:%G' "$f")"
+    info "passwd-file $f: $(grep -cvE '^[[:space:]]*(
     [[ $(stat -c %a "$f") =~ [4-7]$ ]] && flag "$f is world-readable (password hashes)"
   done
 
@@ -741,12 +741,12 @@ scan_dovecot() {
   done
 
   DC_HITS=()
-  if (( ${#patterns[@]} )); then
+  if (( ${
     re=$(IFS='|'; echo "${patterns[*]}")
-    mapfile -t DC_HITS < <(grep -rnE "^[^#]*($re)" /etc/dovecot 2>/dev/null)
-    (( ${#DC_HITS[@]} )) && { info "where (file:line):"; printf '%s\n' "${DC_HITS[@]}" | show; }
+    mapfile -t DC_HITS < <(grep -rnE "^[^
+    (( ${
   fi
-  line=$(grep -vE '^[[:space:]]*(#|$)' /etc/pam.d/dovecot 2>/dev/null)
+  line=$(grep -vE '^[[:space:]]*(
   [[ -n $line ]] && { info "/etc/pam.d/dovecot:"; show <<<"$line"; }
 }
 
@@ -786,14 +786,14 @@ scan_web() {
     info "Listen: $(grep -rhE '^[[:space:]]*Listen[[:space:]]' /etc/httpd/conf /etc/httpd/conf.d 2>/dev/null | tr -s ' \t' ' ' | tr '\n' ';')"
     line=$(grep -rnE '^[[:space:]]*Options[[:space:]].*([[:space:]]|\+)Indexes' /etc/httpd/conf /etc/httpd/conf.d 2>/dev/null)
     [[ -n $line ]] && { note "directory listing enabled:"; show <<<"$line"; }
-    line=$(grep -rnE 'SetHandler[[:space:]]+server-(status|info)' /etc/httpd/conf /etc/httpd/conf.d 2>/dev/null | grep -vE ':[[:space:]]*#')
+    line=$(grep -rnE 'SetHandler[[:space:]]+server-(status|info)' /etc/httpd/conf /etc/httpd/conf.d 2>/dev/null | grep -vE ':[[:space:]]*
     [[ -n $line ]] && { note "server-status/info handler configured:"; show <<<"$line"; }
     mapfile -t files < <(find /etc/httpd/conf /etc/httpd/conf.d /etc/httpd/conf.modules.d -maxdepth 1 -type f 2>/dev/null)
     line=$(unowned "${files[@]}" | tr '\n' ' ')
     [[ -n ${line// } ]] && note "httpd config files not from a package (review): $line"
   fi
 
-  # Roundcube
+  
   RC_DIR=""; RC_CONF=""; RC_DBUSER=""
   for d in "${WEBROOTS[@]}"; do
     f=$(find "$d" -maxdepth 4 -path '*/program/include/iniset.php' 2>/dev/null | head -n1)
@@ -814,18 +814,18 @@ scan_web() {
       grep -qE "^[[:space:]]*\\\$(config|rcmail_config)\['enable_installer'\][[:space:]]*=[[:space:]]*true" "$RC_CONF" && \
         { flag "Roundcube enable_installer = true (the installer can rewrite config and leak secrets)"; RC_INSTALLER_ON=1; }
       grep -q "rcmail-!24ByteDESkey\*Str" "$RC_CONF" && { flag "Roundcube des_key is the public default"; RC_DESKEY_DEFAULT=1; }
-      line=$(grep -E "\['db_dsnw'\]" "$RC_CONF" | grep -vE '^[[:space:]]*(//|#)' | head -n1)
+      line=$(grep -E "\['db_dsnw'\]" "$RC_CONF" | grep -vE '^[[:space:]]*(//|
       if [[ -n $line ]]; then
-        info "DB: $(sed -E 's#(://[^:/@]+:)[^@]*@#\1****@#' <<<"$line" | tr -s ' ')"
-        RC_DBUSER=$(sed -nE 's#.*://([^:/@]+)[:@].*#\1#p' <<<"$line")
+        info "DB: $(sed -E 's
+        RC_DBUSER=$(sed -nE 's
       fi
-      line=$(grep -E "\['(default_host|imap_host|smtp_server|smtp_host)'\]" "$RC_CONF" | grep -vE '^[[:space:]]*(//|#)' | tr -s ' ')
+      line=$(grep -E "\['(default_host|imap_host|smtp_server|smtp_host)'\]" "$RC_CONF" | grep -vE '^[[:space:]]*(//|
       [[ -n $line ]] && show <<<"$line"
     fi
     [[ -d $RC_DIR/installer ]] && note "installer/ directory is still present at $RC_DIR/installer"
   fi
 
-  # SquirrelMail
+  
   for d in "${WEBROOTS[@]}"; do
     f=$(find "$d" -maxdepth 3 -path '*/functions/strings.php' 2>/dev/null | head -n1)
     if [[ -n $f ]] && grep -qi squirrelmail "$f" 2>/dev/null; then
@@ -835,9 +835,9 @@ scan_web() {
     fi
   done
 
-  # webshells and PHP in places PHP doesn't belong
+  
   WEBSHELLS=()
-  if (( ${#WEBROOTS[@]} )); then
+  if (( ${
     mapfile -t WEBSHELLS < <(
       {
         find "${WEBROOTS[@]}" -xdev -type f \( -iname '*.php' -o -iname '*.php[0-9]' -o -iname '*.phtml' -o -iname '*.pht' \
@@ -847,10 +847,10 @@ scan_web() {
         find "${WEBROOTS[@]}" -xdev -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.ico' \) \
              -size -2M -print0 2>/dev/null | xargs -0 -r grep -l '<?php' 2>/dev/null
         find "${WEBROOTS[@]}" -xdev -type f -name '.htaccess' -print0 2>/dev/null | \
-             xargs -0 -r grep -liE 'Add(Type|Handler)[^#]*(php|phtml|x-httpd)|SetHandler[^#]*php|auto_(prepend|append)_file' 2>/dev/null
+             xargs -0 -r grep -liE 'Add(Type|Handler)[^
       } | sed '/^$/d' | sort -u)
-    if (( ${#WEBSHELLS[@]} )); then
-      flag "possible webshells / PHP in odd places (${#WEBSHELLS[@]}):"
+    if (( ${
+      flag "possible webshells / PHP in odd places (${
       for f in "${WEBSHELLS[@]}"; do printf '%s  [%s %s]\n' "$f" "$(stat -c %U "$f" 2>/dev/null)" "$(date -r "$f" '+%F %R' 2>/dev/null)"; done | show
     else
       good "no webshell patterns in web roots"
@@ -950,16 +950,16 @@ run_scan() {
 }
 
 summary() {
-  section "FLAG SUMMARY: ${#FLAGS[@]} item(s) to look at"
+  section "FLAG SUMMARY: ${
   printf '%s\n' "${FLAGS[@]}" >"$FLAGFILE"
   local i=0 f
   for f in "${FLAGS[@]}"; do i=$((i + 1)); printf '  %s%3d%s %s\n' "$R" "$i" "$N" "$f"; done
   rep "(flag list: $FLAGFILE)"
 }
 
-# =============================================================================
-#  BACKUP (asks first)
-# =============================================================================
+
+
+
 do_backup() {
   mkdir -p "$BACKUP"
   info "backing up to $BACKUP ..."
@@ -996,9 +996,9 @@ do_backup() {
   good "backup done ($(du -sh "$BACKUP" 2>/dev/null | cut -f1)). Copy $OUT off this box: red team can wipe it."
 }
 
-# =============================================================================
-#  MENU STEPS (each change asks first)
-# =============================================================================
+
+
+
 disable_user() {
   usermod -L -e 1 -s /sbin/nologin "$1" && { good "disabled $1"; act "DISABLED user $1 (locked, expired, nologin)"; }
 }
@@ -1018,8 +1018,8 @@ step_passwords() {
     [[ $u == root || " $admins " == *" $u "* || " ${others[*]} " == *" $u "* ]] && continue
     others+=("$u")
   done
-  (( ${#others[@]} )) || return 0
-  info "Other users (${#others[@]}): ${others[*]}"
+  (( ${
+  info "Other users (${
   c=$(ask "  [o]ne at a time / [b]ulk from a user:password file you write / [s]kip (default): ")
   case $c in
     o*) each_reset
@@ -1037,7 +1037,7 @@ bulk_passwords() {
     [[ -z $u ]] && continue
     id "$u" >/dev/null 2>&1 || bad+=("$u")
   done <"$f"
-  (( ${#bad[@]} )) && { warn "these users don't exist, fix the file first: ${bad[*]}"; return; }
+  (( ${
   info "will change: $(cut -d: -f1 "$f" | sed '/^$/d' | tr '\n' ' ')"
   confirm "Apply with chpasswd?" || return
   if chpasswd <"$f"; then
@@ -1051,7 +1051,7 @@ bulk_passwords() {
 step_procs() {
   hdr "2) Suspicious processes & other sessions"
   local pid exe my_tty tty line
-  (( ${#SUS_PROCS[@]} )) || good "no processes were flagged"
+  (( ${
   for pid in "${SUS_PROCS[@]}"; do
     [[ -d /proc/$pid ]] || continue
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
@@ -1122,7 +1122,7 @@ step_accounts() {
   each_reset
   for f in "${SUDO_FLAG_FILES[@]}"; do
     [[ -f $f ]] || continue
-    info "$f:"; grep -vE '^[[:space:]]*(#|$)' "$f" | show
+    info "$f:"; grep -vE '^[[:space:]]*(
     each "Quarantine $f?" && quarantine "$f"
   done
   if confirm "Open /etc/sudoers in visudo to review/remove rules?"; then
@@ -1167,7 +1167,7 @@ fw_firewalld() {
   local ports=$1 z zones s p r i rm_rich=() rm_fwd=() rm_src=() mv_if=()
   zones=$(firewall-cmd --get-active-zones 2>/dev/null | awk '!/^[[:space:]]/{print $1}')
   [[ -z $zones ]] && zones=$(firewall-cmd --get-default-zone)
-  # decide on the extras first, so the rollback timer isn't running while you read
+  
   for z in $zones; do
     while IFS= read -r r; do
       [[ -z $r ]] && continue
@@ -1186,7 +1186,7 @@ fw_firewalld() {
   for s in $(firewall-cmd --zone=trusted --list-sources 2>/dev/null); do
     confirm "Remove source $s from the 'trusted' zone (it bypasses the firewall)?" && rm_src+=("$s")
   done
-  (( ${#mv_if[@]} )) && [[ " $zones " != *" public "* ]] && zones+=" public"
+  (( ${
   info "Plan for zone(s) $zones: allow TCP $ports (+ dhcpv6-client), remove every other service/port."
   confirm "Apply now (runtime only, auto-rollback in ${ROLLBACK_SECS}s)?" || return
 
@@ -1202,8 +1202,8 @@ fw_firewalld() {
       [[ $p == */tcp && " $ports " == *" ${p%/tcp} "* ]] || firewall-cmd -q --zone="$z" --remove-port="$p"
     done
   done
-  for r in "${rm_rich[@]}"; do firewall-cmd -q --zone="${r%%|*}" --remove-rich-rule="${r#*|}"; done
-  for r in "${rm_fwd[@]}"; do firewall-cmd -q --zone="${r%%|*}" --remove-forward-port="${r#*|}"; done
+  for r in "${rm_rich[@]}"; do firewall-cmd -q --zone="${r%%|*}" --remove-rich-rule="${r
+  for r in "${rm_fwd[@]}"; do firewall-cmd -q --zone="${r%%|*}" --remove-forward-port="${r
   for s in "${rm_src[@]}"; do firewall-cmd -q --zone=trusted --remove-source="$s"; done
   for z in $zones; do firewall-cmd --zone="$z" --list-all 2>/dev/null | show; done
   keep_or_rollback "firewall-cmd --runtime-to-permanent"
@@ -1281,13 +1281,13 @@ step_postfix() {
   [[ $(postconf -h disable_vrfy_command) == no ]] && confirm "Disable VRFY (stops username probing)?" && \
     pset "disable_vrfy_command = yes" no
   cur=$(postconf -h smtpd_banner)
-  # shellcheck disable=SC2016  # $myhostname is a postfix variable, not a shell one
+  
   [[ $cur == *mail_version* ]] && confirm "Hide the Postfix version in the SMTP banner?" && \
     pset 'smtpd_banner = $myhostname ESMTP' "$cur"
 
   each_reset
   for e in "${PF_MAP_FLAG_FILES[@]}"; do
-    p=${e%%|*}; e=${e#*|}; t=${e%%|*}; f=${e#*|}
+    p=${e%%|*}; e=${e
     info "$p -> $f"
     if each "Open $f in the editor?" && edit "$f"; then
       [[ $t =~ ^(hash|lmdb|btree|cdb|dbm)$ ]] && postmap "$t:$f" && act "postmap $t:$f"
@@ -1332,7 +1332,7 @@ step_dovecot() {
   have doveconf || { info "dovecot not installed"; return; }
   local f files=() changed=0 err dropin=/etc/dovecot/conf.d/99-ccdc.conf
   [[ -d $OUT/dovecot.before ]] || cp -a /etc/dovecot "$OUT/dovecot.before"
-  if (( ${#DC_HITS[@]} )); then
+  if (( ${
     warn "flagged dovecot settings:"; printf '%s\n' "${DC_HITS[@]}" | show
     note "Fix: comment out the static / nopassword / master / checkpassword passdb or the post-login 'executable'. Keep the normal pam or passwd-file passdb (and a static USERdb is normal)."
     mapfile -t files < <(printf '%s\n' "${DC_HITS[@]}" | cut -d: -f1 | sort -u)
@@ -1343,7 +1343,7 @@ step_dovecot() {
   fi
   if (( DC_PWLOG )) && grep -qE '^[[:space:]]*!include[[:space:]]+conf\.d/\*\.conf' /etc/dovecot/dovecot.conf 2>/dev/null; then
     if confirm "Write $dropin to stop logging passwords (auth_debug_passwords = no, auth_verbose_passwords = no)?"; then
-      printf '# added by webmail-5min.sh %s\nauth_debug_passwords = no\nauth_verbose_passwords = no\n' "$TS" >"$dropin"
+      printf '
       chmod 644 "$dropin"
       if doveconf -n >/dev/null 2>&1; then act "WROTE $dropin"; changed=1; else warn "dovecot rejected it; removing it"; rm -f "$dropin"; fi
     fi
@@ -1434,7 +1434,7 @@ step_persist() {
   local f c job unit parent reload=0
   for f in "${CRON_FLAG_FILES[@]}"; do
     [[ -f $f ]] || continue
-    echo; info "$f:"; grep -vE '^[[:space:]]*(#|$)' "$f" | head -n 10 | show
+    echo; info "$f:"; grep -vE '^[[:space:]]*(
     c=$(ask "  [q]uarantine / [e]dit / [s]kip (default): ")
     case $c in q*) quarantine "$f" ;; e*) edit "$f" ;; esac
   done
@@ -1448,7 +1448,7 @@ step_persist() {
   for f in "${UNIT_FLAG_FILES[@]}"; do
     [[ -f $f ]] || continue
     unit=$(basename "$f")
-    echo; info "$f:"; grep -vE '^[[:space:]]*(#|$)' "$f" | head -n 12 | show
+    echo; info "$f:"; grep -vE '^[[:space:]]*(
     if [[ $f == *.d/*.conf ]]; then
       parent=$(basename "${f%/*}" .d)
       confirm "Quarantine this drop-in (it changes $parent)?" && { quarantine "$f"; reload=1; note "restart $parent afterwards to drop the override"; }
@@ -1465,7 +1465,7 @@ step_persist() {
   (( RCLOCAL_FLAG )) && confirm "Edit $RCLOCAL_FILE?" && edit "$RCLOCAL_FILE"
   each_reset
   for f in "${SHELLRC_FLAG_FILES[@]}"; do each "Edit $f (the scan showed the suspicious lines)?" && edit "$f"; done
-  if (( ${#IMMUTABLE_FILES[@]} )); then
+  if (( ${
     printf '%s\n' "${IMMUTABLE_FILES[@]}" | show
     each_reset
     for f in "${IMMUTABLE_FILES[@]}"; do each "chattr -i $f?" && chattr -i "$f" && act "CHATTR -i $f"; done
@@ -1507,7 +1507,7 @@ step_ssh() {
   show <<<"${block%$'\n'}"
   confirm "Apply, test with sshd -t, then reload sshd?" || return
   cp -a /etc/ssh/sshd_config "$OUT/sshd_config.before"
-  { printf '# --- added by webmail-5min.sh %s ---\n%s# --- end webmail-5min.sh ---\n\n' "$TS" "$block"
+  { printf '
     cat "$OUT/sshd_config.before"; } >/etc/ssh/sshd_config
   if sshd -t 2>"$OUT/sshd-t.txt"; then
     if systemctl reload sshd 2>/dev/null; then good "sshd reloaded"; else warn "sshd reload failed: systemctl status sshd"; fi
@@ -1571,14 +1571,14 @@ step_mysql() {
   fi
 }
 
-# ---- verification -------------------------------------------------------------
-check_port() {       # check_port <port> <greeting regex> <name>
+
+check_port() {       
   local line
   line=$(timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1 && head -n1 <&3" 2>/dev/null | tr -d '\r')
   if [[ $line =~ $2 ]]; then good "$3 :$1 answers: ${line:0:70}"
   else warn "$3 :$1 did not answer as expected: '${line:0:70}'"; fi
 }
-check_tls() {        # check_tls <port> <greeting regex> <name>
+check_tls() {        
   local line
   line=$(timeout 5 openssl s_client -connect "127.0.0.1:$1" -quiet -ign_eof </dev/null 2>/dev/null | head -n1 | tr -d '\r')
   if [[ $line =~ $2 ]]; then good "$3 :$1 answers: ${line:0:70}"
@@ -1623,9 +1623,9 @@ verify_services() {
   fi
 }
 
-# =============================================================================
-#  MAIN
-# =============================================================================
+
+
+
 STEP_FUNCS=(step_passwords step_procs step_accounts step_firewall step_postfix step_dovecot
             step_web step_persist step_ssh step_services step_selinux step_mysql)
 
@@ -1668,7 +1668,7 @@ finish() {
   printf '  %sCopy %s off this box now (e.g. scp -r %s you@jumpbox:).%s\n' "$Y" "$OUT" "$OUT" "$N"
 }
 
-usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+usage() { awk 'NR > 1 && /^
 
 main() {
   local scan_only=0

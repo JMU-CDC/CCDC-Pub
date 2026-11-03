@@ -1,17 +1,5 @@
-<#
-================================================================================
-MWCCDC 2019 MSSQL VM Interactive Hardening Script
-- Prompts interactively for OS (sysadmin/Administrator) and SQL (sa) passwords
-- Rotates local accounts and MSSQL 'sa' login
-- Strips IFEO debugger backdoors (Sticky Keys / Utilman)
-- Disables dangerous SQL features (xp_cmdshell, OLE Automation, CLR, etc.)
-- Enforces Windows Firewall rules for scored services (MSSQL: 1433, RDP: 3389, SMB: 445, ICMP)
-- Validates the presence of the mock water facility SOP files
-- Enables process creation and logon auditing
-================================================================================
-#>
 
-# Ensure script runs with Administrator privileges
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "[-] This script must be executed in an elevated PowerShell session (Run as Administrator)." -ForegroundColor Red
     Exit
@@ -21,7 +9,7 @@ Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host "   MWCCDC 2019 MSSQL INTERACTIVE HARDENING   " -ForegroundColor Cyan
 Write-Host "=============================================" -ForegroundColor Cyan
 
-# Helper function for interactive secure password entry with complexity checks
+
 function Get-SecureInputPassword {
     param (
         [string]$PromptTitle
@@ -47,7 +35,7 @@ function Get-SecureInputPassword {
             continue
         }
 
-        # Check complexity: >= 12 chars, upper, lower, digit, symbol
+        
         if ($plain1.Length -ge 12 -and $plain1 -match "[A-Z]" -and $plain1 -match "[a-z]" -and $plain1 -match "[0-9]" -and $plain1 -match "[\W_]") {
             $valid = $true
             $plainText = $plain1
@@ -64,11 +52,11 @@ function Get-SecureInputPassword {
     }
 }
 
-# 1. Interactive Password Prompts
+
 $OSCredentials  = Get-SecureInputPassword -PromptTitle "Set password for Local Windows Accounts (sysadmin, Administrator)"
 $SqlCredentials = Get-SecureInputPassword -PromptTitle "Set password for SQL Server 'sa' Account"
 
-# 2. Update Local OS Passwords
+
 Write-Host "`n[*] Updating local Windows user accounts..." -ForegroundColor Yellow
 $OSUsers = @("sysadmin", "Administrator")
 foreach ($u in$OSUsers) {
@@ -79,7 +67,7 @@ foreach ($u in$OSUsers) {
     }
 }
 
-# 3. Clean Accessibility & Sticky Key Hijacks (IFEO Debugger Persistence)
+
 Write-Host "`n[*] Purging accessibility and IFEO debugger hijacking..." -ForegroundColor Yellow
 $AccessibilityApps = @("sethc.exe", "utilman.exe", "osk.exe", "magnify.exe", "narrator.exe", "DisplaySwitch.exe")
 foreach ($app in $AccessibilityApps) {
@@ -94,10 +82,10 @@ foreach ($app in $AccessibilityApps) {
 }
 Write-Host "[+] Accessibility registry keys audited." -ForegroundColor Green
 
-# 4. MSSQL Hardening via sqlcmd
+
 Write-Host "`n[*] Hardening MSSQL Database Instance..." -ForegroundColor Yellow
 
-# Escape any single quotes if present in the password string
+
 $EscapedSqlPass =$SqlCredentials.PlainText.Replace("'", "''")
 
 $sqlQuery = @"
@@ -122,25 +110,25 @@ REVOKE EXECUTE ON master..xp_fileexist FROM [public];
 "@
 
 try {
-    # Connect using integrated Windows Authentication (-E) to local default instance
+    
     $result = sqlcmd -E -S localhost -Q$sqlQuery -b
     Write-Host "[+] MSSQL instance successfully hardened and 'sa' password rotated." -ForegroundColor Green
 } catch {
     Write-Host "[-] Error executing sqlcmd queries. Ensure SQL Server service (MSSQLSERVER) is running." -ForegroundColor Red
 }
 
-# Clear plain text credentials from memory
+
 $OSCredentials.PlainText =$null
 $SqlCredentials.PlainText =$null
 $EscapedSqlPass =$null
 
-# 5. Preserve Scored Inbound Services in Windows Firewall
+
 Write-Host "`n[*] Applying host firewall rules for scored services..." -ForegroundColor Yellow
 
-# Enable firewall across all network profiles
+
 Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
 
-# Define required inbound rules for scoring (MSSQL: 1433, RDP: 3389, SMB: 445)
+
 $ScoredRules = @(
     @{ Name = "CCDC-MSSQL-In"; Port = 1433; Protocol = "TCP" },
     @{ Name = "CCDC-RDP-In";   Port = 3389; Protocol = "TCP" },
@@ -159,11 +147,11 @@ foreach ($rule in $ScoredRules) {
     }
 }
 
-# Preserve ICMP Echo Reply (Required by MWCCDC competition rules)
+
 Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)" -ErrorAction SilentlyContinue
 Write-Host "[+] ICMPv4 Echo Request rule enabled." -ForegroundColor Green
 
-# 6. Verify Scored SOP Water Facility SMB Share
+
 Write-Host "`n[*] Validating Scored SOP SMB Shares..." -ForegroundColor Yellow
 $shares = Get-SmbShare \vert{} Where-Object {$_.Name -notmatch "ADMIN\$|C\$|IPC\$" }
 
