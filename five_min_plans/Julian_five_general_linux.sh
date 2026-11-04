@@ -125,7 +125,7 @@ pkg_changed() {
 suspect_files() { unowned "$@"; local f; for f in "$@"; do pkg_changed "$f" && echo "$f"; done; }
 
 
-ssh_sessions() { ps -eo pid=,args= 2>/dev/null | awk '$2 ~ /^sshd(-session)?:$/ && $3 ~ /@/ { print $1, $3 }'; }
+ssh_sessions() { ps -eo pid= -o args= 2>/dev/null | awk '$2 ~ /^sshd(-session)?:$/ && $3 ~ /@/ { print $1, $3 }'; }
 end_sessions() {   
   local pid s
   while read -r pid s; do
@@ -233,7 +233,7 @@ while read -r pid user args; do
     tr '\0' ' ' <"/proc/$pid/cmdline" >"$SAVE/proc/$pid.cmdline" 2>/dev/null
     kill -9 "$pid" && { echo "  Killed."; act "KILLED $pid: ${args:0:150}"; }
   fi
-done < <(ps -eo pid=,user:32=,args= 2>/dev/null)
+done < <(ps -eo pid= -o user:32= -o args= 2>/dev/null)
 [ $SUS = 0 ] && echo "  None matched. (Not proof: a rootkit can hide processes.)" || \
   echo "  If a killed shell comes back, it's being respawned: see step 8."
 
@@ -241,7 +241,7 @@ done < <(ps -eo pid=,user:32=,args= 2>/dev/null)
 step "3. Change passwords"
 
 for f in /etc/shadow /etc/passwd; do
-  lsattr -d "$f" 2>/dev/null | awk '{exit !($1 ~ /i/)}' && {
+  lsattr -d "$f" 2>/dev/null | awk '$1 ~ /i/ {f=1} END {exit !f}' && {
     warn "$f is IMMUTABLE (chattr +i): every password change will fail."
     ask "  Remove the immutable flag (chattr -i $f)?" && chattr -i "$f" && act "CHATTR -i $f"; }
 done
