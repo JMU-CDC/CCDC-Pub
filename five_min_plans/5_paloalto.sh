@@ -49,13 +49,53 @@ set address host-splunk ip-netmask 172.20.240.20
 set address host-ad ip-netmask 172.20.240.100
 set address host-mssql ip-netmask 172.20.240.120
 
-set rulebase security rules 01-ALLOW-SCORED-ICMP to trust from untrust source any destination [ host-ecom host-email host-splunk host-ad host-mssql ] service any application ping action allow log-end yes
-set rulebase security rules 02-ALLOW-SCORED-WEB to trust from untrust source any destination [ host-ecom host-email ] service [ service-http service-https ] application [ web-browsing ssl ] action allow log-end yes
-set rulebase security rules 03-ALLOW-SCORED-MAIL to trust from untrust source any destination host-email service any application [ smtp pop3 imap ] action allow log-end yes
-set rulebase security rules 04-ALLOW-SCORED-SPLUNK to trust from untrust source any destination host-splunk service [ service-http service-https srv-splunk-mgmt ] application any action allow log-end yes
-set rulebase security rules 05-ALLOW-SCORED-MSSQL to trust from untrust source any destination host-mssql service [ srv-mssql srv-rdp srv-smb ] application any action allow log-end yes
-set rulebase security rules 06-ALLOW-SCORED-AD to trust from untrust source any destination host-ad service [ srv-winrm-http srv-winrm-https any ] application [ ms-win-remote-management dns kerberos ldap active-directory ] action allow log-end yes
+# 01 - Scored ICMP
+set rulebase security rules 01-ALLOW-SCORED-ICMP from Outside to Inside source any
+set rulebase security rules 01-ALLOW-SCORED-ICMP destination host-ecom
+set rulebase security rules 01-ALLOW-SCORED-ICMP destination host-email
+set rulebase security rules 01-ALLOW-SCORED-ICMP destination host-splunk
+set rulebase security rules 01-ALLOW-SCORED-ICMP destination host-ad
+set rulebase security rules 01-ALLOW-SCORED-ICMP destination host-mssql
+set rulebase security rules 01-ALLOW-SCORED-ICMP service any application ping action allow log-end yes
 
+# 02 - Scored Web (HTTP / HTTPS)
+set rulebase security rules 02-ALLOW-SCORED-WEB from Outside to Inside source any
+set rulebase security rules 02-ALLOW-SCORED-WEB destination host-ecom
+set rulebase security rules 02-ALLOW-SCORED-WEB destination host-email
+set rulebase security rules 02-ALLOW-SCORED-WEB service service-http
+set rulebase security rules 02-ALLOW-SCORED-WEB service service-https
+set rulebase security rules 02-ALLOW-SCORED-WEB application web-browsing
+set rulebase security rules 02-ALLOW-SCORED-WEB application ssl
+set rulebase security rules 02-ALLOW-SCORED-WEB action allow log-end yes
+
+# 03 - Scored Mail (SMTP, POP3, IMAP)
+set rulebase security rules 03-ALLOW-SCORED-MAIL from Outside to Inside source any destination host-email service any
+set rulebase security rules 03-ALLOW-SCORED-MAIL application smtp
+set rulebase security rules 03-ALLOW-SCORED-MAIL application pop3
+set rulebase security rules 03-ALLOW-SCORED-MAIL application imap
+set rulebase security rules 03-ALLOW-SCORED-MAIL action allow log-end yes
+
+# 04 - Scored Splunk
+set rulebase security rules 04-ALLOW-SCORED-SPLUNK from Outside to Inside source any destination host-splunk application any action allow log-end yes
+set rulebase security rules 04-ALLOW-SCORED-SPLUNK service service-http
+set rulebase security rules 04-ALLOW-SCORED-SPLUNK service service-https
+set rulebase security rules 04-ALLOW-SCORED-SPLUNK service srv-splunk-mgmt
+
+# 05 - Scored MSSQL, SMB, RDP
+set rulebase security rules 05-ALLOW-SCORED-MSSQL from Outside to Inside source any destination host-mssql application any action allow log-end yes
+set rulebase security rules 05-ALLOW-SCORED-MSSQL service srv-mssql
+set rulebase security rules 05-ALLOW-SCORED-MSSQL service srv-rdp
+set rulebase security rules 05-ALLOW-SCORED-MSSQL service srv-smb
+
+# 06 - Scored AD & WinRM
+set rulebase security rules 06-ALLOW-SCORED-AD from Outside to Inside source any destination host-ad service any action allow log-end yes
+set rulebase security rules 06-ALLOW-SCORED-AD application ms-win-remote-management
+set rulebase security rules 06-ALLOW-SCORED-AD application dns
+set rulebase security rules 06-ALLOW-SCORED-AD application kerberos
+set rulebase security rules 06-ALLOW-SCORED-AD application ldap
+set rulebase security rules 06-ALLOW-SCORED-AD application active-directory
+
+# Rule Ordering
 move rulebase security rules 01-ALLOW-SCORED-ICMP top
 move rulebase security rules 02-ALLOW-SCORED-WEB after 01-ALLOW-SCORED-ICMP
 move rulebase security rules 03-ALLOW-SCORED-MAIL after 02-ALLOW-SCORED-WEB
@@ -63,19 +103,35 @@ move rulebase security rules 04-ALLOW-SCORED-SPLUNK after 03-ALLOW-SCORED-MAIL
 move rulebase security rules 05-ALLOW-SCORED-MSSQL after 04-ALLOW-SCORED-SPLUNK
 move rulebase security rules 06-ALLOW-SCORED-AD after 05-ALLOW-SCORED-MSSQL
 
-set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND to untrust from trust source 172.20.240.0/24 destination any service [ service-http service-https ] application [ web-browsing ssl dns ntp ] action allow log-end yes
+# 07 - Internal Outbound Access (Web, DNS, NTP)
+set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND from Inside to Outside source 172.20.240.0/24 destination any action allow log-end yes
+set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND service service-http
+set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND service service-https
+set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND application web-browsing
+set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND application ssl
+set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND application dns
+set rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND application ntp
 move rulebase security rules 07-ALLOW-INTERNAL-OUTBOUND after 06-ALLOW-SCORED-AD
 
-set rulebase security rules 08-DROP-UNAUTHORIZED-EGRESS to untrust from trust source 172.20.240.0/24 destination any service any application any action drop log-end yes
+# 08 - Drop Unauthorized Egress
+set rulebase security rules 08-DROP-UNAUTHORIZED-EGRESS from Inside to Outside source 172.20.240.0/24 destination any service any application any action drop log-end yes
 move rulebase security rules 08-DROP-UNAUTHORIZED-EGRESS after 07-ALLOW-INTERNAL-OUTBOUND
 
-set rulebase security rules 09-BLOCK-REDTEAM-MGMT to trust from untrust source any destination 172.20.240.0/24 service any application [ ssh telnet ms-rdp vnc smb ] action reset-both log-end yes
+# 09 - Reset Inbound Red Team Management Probes
+set rulebase security rules 09-BLOCK-REDTEAM-MGMT from Outside to Inside source any destination 172.20.240.0/24 service any action reset-both log-end yes
+set rulebase security rules 09-BLOCK-REDTEAM-MGMT application ssh
+set rulebase security rules 09-BLOCK-REDTEAM-MGMT application telnet
+set rulebase security rules 09-BLOCK-REDTEAM-MGMT application ms-rdp
+set rulebase security rules 09-BLOCK-REDTEAM-MGMT application vnc
+set rulebase security rules 09-BLOCK-REDTEAM-MGMT application smb
 move rulebase security rules 09-BLOCK-REDTEAM-MGMT after 08-DROP-UNAUTHORIZED-EGRESS
 
-set rulebase security rules 10-GLOBAL-DENY-ALL to any from any source any destination any service any application any action drop log-end yes
+# 10 - Global Deny All
+set rulebase security rules 10-GLOBAL-DENY-ALL from any to any source any destination any service any application any action drop log-end yes
 move rulebase security rules 10-GLOBAL-DENY-ALL bottom
 
-set deviceconfig system permitted-ip [ 172.20.240.0/24 ]
+# System Protections
+set deviceconfig system permitted-ip 172.20.240.0/24
 set deviceconfig system idle-timeout 15
 EOF
 
