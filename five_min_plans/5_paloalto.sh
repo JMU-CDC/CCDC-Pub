@@ -168,3 +168,19 @@ echo "================================================================="
 echo "[+] Deployment complete! Configuration committed and verified."
 echo "[+] Current active sessions flushed."
 echo "================================================================="
+
+echo "[+] Connectivity tests."
+for ip in 172.20.240.10 \
+          172.20.240.15 \
+          172.20.240.20 \
+          172.20.240.100 \
+          172.20.240.120; do
+    if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+        echo "[+] $ip Ping: OK"
+    else
+        echo "[-] $ip Ping: FAILED"
+    fi
+done
+
+echo "[+] Check password change and review the security-policy with 'show running security-policy'."
+ssh -o StrictHostKeyChecking=no admin@172.20.240.200
