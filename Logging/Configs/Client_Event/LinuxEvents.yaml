@@ -1,0 +1,19 @@
+name: Custom.Linux.Events.All
+description: |
+  Real-time Linux event streaming artifact. Captures syslog, auth, and sudo
+  events to stream to the Velociraptor server.
+type: CLIENT_EVENT
+
+parameters:
+  - name: SyslogFilterRegex
+    description: Filter for security-critical syslog and authentication events
+    default: "(sshd|sudo|su|login|polkit|pam|systemd-logind|Accepted|Failed|COMMAND=)"
+
+sources:
+  - name: Syslog
+    precondition: SELECT OS FROM info() WHERE OS = 'linux'
+    query: |
+      SELECT Timestamp, Hostname, Facility, Severity, AppName, Message
+      FROM watch_syslog()
+      WHERE Message =~ SyslogFilterRegex OR AppName =~ SyslogFilterRegex
+

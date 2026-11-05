@@ -4,7 +4,7 @@ type: SERVER_EVENT
 
 parameters:
   - name: ArtifactsToWatch
-    default: Generic.Client.Stats,Windows.Events.ProcessCreation,Custom.Windows.Events.AllEventLogs
+    default: Generic.Client.Stats,Windows.Events.ProcessCreation,Custom.Windows.Events.AllEventLogs,Custom.Linux.Events.All
   - name: SplunkURL
     default: https://127.0.0.1:8088/services/collector
   - name: SplunkToken
@@ -30,3 +30,4 @@ sources:
         query=events, url=SplunkURL, token=SplunkToken, index=SplunkIndex,
         skip_verify=SkipVerify, sourcetype="velociraptor:events",
         timestamp_field="timestamp")
+

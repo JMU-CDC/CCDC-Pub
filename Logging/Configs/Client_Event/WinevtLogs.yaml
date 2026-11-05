@@ -1,0 +1,36 @@
+name: Custom.Windows.Events.AllEventLogs
+description: |
+  Continuously watches high-value Windows security and operational event logs
+  and streams records to the Velociraptor server.
+type: CLIENT_EVENT
+
+parameters:
+  - name: TargetChannels
+    description: Globs of target EVTX files to monitor
+    default: |
+      C:/Windows/System32/winevt/Logs/Security.evtx,
+      C:/Windows/System32/winevt/Logs/System.evtx,
+      C:/Windows/System32/winevt/Logs/Microsoft-Windows-PowerShell%4Operational.evtx,
+      C:/Windows/System32/winevt/Logs/Microsoft-Windows-TaskScheduler%4Operational.evtx,
+      C:/Windows/System32/winevt/Logs/Microsoft-Windows-Windows Defender%4Operational.evtx,
+      C:/Windows/System32/winevt/Logs/Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx,
+      C:/Windows/System32/winevt/Logs/Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx
+
+sources:
+  - precondition: SELECT OS FROM info() WHERE OS = 'windows'
+    query: |
+      LET targets = SELECT OSPath FROM glob(
+        globs=split(string=regex_replace(source=TargetChannels, re="\\s+", replace=""), sep=","))
+
+      SELECT * FROM foreach(
+        row=targets,
+        async=TRUE,
+        query={
+          SELECT System.TimeCreated.SystemTime AS EventTime,
+                 System.Channel AS Channel,
+                 System.EventID.Value AS EventID,
+                 System.Computer AS Computer,
+                 EventData, UserData
+          FROM watch_evtx(filename=OSPath)
+        })
+
