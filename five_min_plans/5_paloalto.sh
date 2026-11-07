@@ -103,11 +103,11 @@ delete network virtual-router default routing-table ip static-route default-to-v
 delete network virtual-router default routing-table ip static-route default
 delete network virtual-router default routing-table ip static-route Def-to-Vyos
 
-# Set the clean Default Route to VyOS using edit mode to bypass line-by-line validation
+# Set the clean Default Route to VyOS using edit mode (Interface set before Destination)
 edit network virtual-router default routing-table ip static-route default
-set nexthop ip-address 172.16.0.254
 set interface ethernet1/1
 set destination 0.0.0.0/0
+set nexthop ip-address 172.16.0.254
 set metric 5
 top
 
@@ -134,9 +134,10 @@ set rulebase security rules 04-ALLOW-SCORED-SPLUNK from Outside to Inside source
 set rulebase security rules 05-ALLOW-SCORED-MSSQL from Outside to Inside source any destination host-mssql service [ srv-mssql srv-rdp srv-smb ] application any action allow log-end yes
 set rulebase security rules 06-ALLOW-SCORED-AD from Outside to Inside source any destination host-ad service any application [ dns kerberos ldap active-directory msrpc ] action allow log-end yes
 
-# Outbound Workstation Access & Red Team Drops
+# Outbound Workstation Access & Red Team Drops (App-ID relaxed for outbound web)
 set rulebase security rules 07-OUTBOUND-DNS from Inside to Outside source net-internal destination any application dns service application-default action allow log-end yes
-set rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS from Inside to Outside source net-internal destination any service [ service-http service-https ] application [ web-browsing ssl ] action allow log-end yes
+set rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS from Inside to Outside source net-internal destination any service [ service-http service-https ] application any action allow log-end yes
+set rulebase security rules 08.5-OUTBOUND-PING from Inside to Outside source net-internal destination any application ping service application-default action allow log-end yes
 set rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS from Inside to Outside source net-internal destination any service any application any action drop log-end yes
 set rulebase security rules 10-BLOCK-REDTEAM-MGMT from Outside to Inside source any destination ${INTERNAL_SUBNET} service any application [ ssh telnet ms-rdp vnc ms-ds-smb ] action reset-both log-end yes
 set rulebase security rules 11-GLOBAL-DENY-ALL from any to any source any destination any service any application any action drop log-end yes
@@ -150,12 +151,14 @@ move rulebase security rules 05-ALLOW-SCORED-MSSQL after 04-ALLOW-SCORED-SPLUNK
 move rulebase security rules 06-ALLOW-SCORED-AD after 05-ALLOW-SCORED-MSSQL
 move rulebase security rules 07-OUTBOUND-DNS after 06-ALLOW-SCORED-AD
 move rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS after 07-OUTBOUND-DNS
-move rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS after 08-OUTBOUND-WEB-DOWNLOADS
+move rulebase security rules 08.5-OUTBOUND-PING after 08-OUTBOUND-WEB-DOWNLOADS
+move rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS after 08.5-OUTBOUND-PING
 move rulebase security rules 10-BLOCK-REDTEAM-MGMT after 09-BLOCK-UNAUTHORIZED-EGRESS
 move rulebase security rules 11-GLOBAL-DENY-ALL bottom
 
-# Outbound NAT
-set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation dynamic-ip-and-port interface-address interface ethernet1/1
+# Outbound NAT (Explicit IP used and rule forced to the top)
+set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation dynamic-ip-and-port interface-address ip 172.16.0.1/24
+move rulebase nat rules LAN-TO-TRANSIT-NAT top
 
 # Splunk Forwarding
 set shared log-settings syslog Splunk-Server server Splunk-Node server ${BASE_OCTETS}.20 transport TCP port 9997 format BSD facility LOG_LOCAL7
@@ -221,6 +224,6 @@ echo "      (If any route besides 'default' points to 0.0.0.0/0, delete it!)"
 echo "      (Example: delete network virtual-router default routing-table ip static-route Bad-Route)"
 echo ""
 echo "   4. Commit the changes:"
-echo "      commit description \"MWCCDC-Harden\""
+echo "      commit description \"MWCCDC-Harden-With-Splunk\""
 echo "======================================================================="
 echo ""
