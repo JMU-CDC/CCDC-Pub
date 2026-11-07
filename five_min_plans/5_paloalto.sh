@@ -153,7 +153,7 @@ move rulebase security rules 11-GLOBAL-DENY-ALL bottom
 # Outbound NAT
 set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation dynamic-ip-and-port interface-address interface ethernet1/1
 
-# Splunk Forwarding (Fixed Format and References)
+# Splunk Forwarding
 set shared log-settings syslog Splunk-Server server ${BASE_OCTETS}.20 transport TCP port 9997 format BSD facility LOG_LOCAL7
 set shared log-settings system match-list Splunk-Sys filter "All Logs" send-syslog Splunk-Server
 set shared log-settings config match-list Splunk-Cfg filter "All Logs" send-syslog Splunk-Server
@@ -162,12 +162,11 @@ set shared log-settings config match-list Splunk-Cfg filter "All Logs" send-sysl
 set deviceconfig system permitted-ip ${INTERNAL_SUBNET}
 set mgt-config users admin phash "${ADMIN_HASH}"
 
-commit description "MWCCDC-Harden-With-Splunk"
 exit
 exit
 EOF
 
-echo "[*] Connecting to firewall to push configuration..."
+echo "[*] Connecting to firewall to stage candidate configuration..."
 stream_commands() {
   echo "[*] Waiting 15 seconds for PAN-OS shell to initialize..." >&2
   sleep 15
@@ -184,12 +183,8 @@ stream_commands() {
   while IFS= read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     echo "$line"
-    if [[ "$line" =~ ^commit ]]; then 
-      echo "[*] Committing... Waiting 50 seconds for process to finish." >&2
-      sleep 50
-    else 
-      sleep 1
-    fi
+    # Unified 1-second delay since commit is removed
+    sleep 1
   done < "${TMP_CMDS}"
   
   sleep 2
@@ -202,4 +197,22 @@ else
 fi
 
 rm -f "${TMP_CMDS}"
-echo "[+] Configuration finished, committed, and active sessions cleared."
+
+echo ""
+echo "======================================================================="
+echo " [!] PAYLOAD STAGED SUCCESSFULLY! MANUAL COMMIT REQUIRED [!] "
+echo "======================================================================="
+echo " The configuration has been loaded into the candidate config."
+echo " To apply these changes and lock down the firewall, you MUST run:"
+echo ""
+echo "   1. Log into the firewall:"
+echo "      ssh admin@${PA_IP}"
+echo "      (Use your NEW password: ${NEW_PASS})"
+echo ""
+echo "   2. Enter config mode:"
+echo "      configure"
+echo ""
+echo "   3. Commit the changes:"
+echo "      commit description \"MWCCDC-Harden-With-Splunk\""
+echo "======================================================================="
+echo ""
