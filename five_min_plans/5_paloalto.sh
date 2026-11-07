@@ -24,6 +24,10 @@ while true; do
   echo "[-] Passwords do not match or are too short."
 done
 
+# Generate PAN-OS compatible password hash locally to bypass interactive CLI prompt
+SALT=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w 8 | head -n 1)
+ADMIN_HASH=$(openssl passwd -1 -salt "$SALT" "${NEW_PASS}")
+
 echo "[*] Verifying port 22 is accepting connections..."
 until timeout 2 bash -c "</dev/tcp/${PA_IP}/22" >/dev/null 2>&1; do
   sleep 2
@@ -36,39 +40,37 @@ echo "[+] Port 22 open."
 echo "[*] PHASE 1: Executing Observe & Backup (Saving to ${BACKUP_FILE})..."
 
 observe_and_backup() {
-  sleep 6
-  echo "set cli scripting-mode on"
-  sleep 0.5
-  
-  # Gather interface, zone, routing, and NAT intelligence
-  echo "show interface all"
-  sleep 0.5
-  echo "show zone all"
-  sleep 0.5
-  echo "show routing route"
-  sleep 0.5
-  echo "show running nat-policy"
-  sleep 0.5
-  
-  # Capture active scoring or Red Team connections prior to dropping
-  echo "show session all"
-  sleep 0.5
-  
-  # Capture the formatted, active security policy
-  echo "show running security-policy"
-  sleep 0.5
-  
-  # Dump the raw configuration commands
-  echo "set cli config-output-format set"
-  sleep 0.5
-  echo "configure"
+  echo "[*] Waiting 15 seconds for PAN-OS shell to initialize..." >&2
+  sleep 15
+  echo ""
   sleep 2
+  
+  echo "set cli scripting-mode on"
+  sleep 1
+  
+  echo "show interface all"
+  sleep 1
+  echo "show zone all"
+  sleep 1
+  echo "show routing route"
+  sleep 1
+  echo "show running nat-policy"
+  sleep 1
+  echo "show session all"
+  sleep 1
+  echo "show running security-policy"
+  sleep 1
+  
+  echo "set cli config-output-format set"
+  sleep 1
+  echo "configure"
+  sleep 3
   echo "show"
-  sleep 5
-  echo "exit"
-  sleep 0.5
+  sleep 6
   echo "exit"
   sleep 1
+  echo "exit"
+  sleep 2
 }
 
 SSH_CMD="ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${PA_USER}@${PA_IP}"
@@ -90,21 +92,17 @@ echo "[*] PHASE 2: Generating Hardening Payload..."
 TMP_CMDS=$(mktemp /tmp/panos_batch.XXXXXX)
 
 cat << EOF > "${TMP_CMDS}"
-set cli scripting-mode on
-set cli echo-input on
-set cli config-output-format set
-configure
-
 # Interface & Zone Bindings
 set network interface ethernet ethernet1/1 layer3 ip 172.16.0.1/24
 set network interface ethernet ethernet1/2 layer3 ip ${BASE_OCTETS}.254/24
 set zone Outside network layer3 ethernet1/1
 set zone Inside network layer3 ethernet1/2
 
-# Default Route to VyOS
+# Default Route to VyOS (Metric 5 to override any existing DHCP default routes)
 set network virtual-router default routing-table ip static-route default-to-vyos nexthop ip-address 172.16.0.254
 set network virtual-router default routing-table ip static-route default-to-vyos destination 0.0.0.0/0
 set network virtual-router default routing-table ip static-route default-to-vyos interface ethernet1/1
+set network virtual-router default routing-table ip static-route default-to-vyos metric 5
 
 # Service & Scored Server Address Objects
 set service srv-splunk-mgmt protocol tcp port 8089
@@ -121,19 +119,19 @@ set address host-ad ip-netmask ${BASE_OCTETS}.100
 set address host-mssql ip-netmask ${BASE_OCTETS}.120
 set address net-internal ip-netmask ${INTERNAL_SUBNET}
 
-# Ingress Scored Rules
+# Ingress Scored Rules (Fixed App-IDs)
 set rulebase security rules 01-ALLOW-SCORED-ICMP from Outside to Inside source any destination [ host-ecom host-email host-splunk host-ad host-mssql ] service any application ping action allow log-end yes
 set rulebase security rules 02-ALLOW-SCORED-WEB from Outside to Inside source any destination [ host-ecom host-email ] service [ service-http service-https ] application [ web-browsing ssl ] action allow log-end yes
 set rulebase security rules 03-ALLOW-SCORED-MAIL from Outside to Inside source any destination host-email service any application [ smtp pop3 imap ] action allow log-end yes
 set rulebase security rules 04-ALLOW-SCORED-SPLUNK from Outside to Inside source any destination host-splunk service [ service-http service-https srv-splunk-mgmt ] application any action allow log-end yes
 set rulebase security rules 05-ALLOW-SCORED-MSSQL from Outside to Inside source any destination host-mssql service [ srv-mssql srv-rdp srv-smb ] application any action allow log-end yes
-set rulebase security rules 06-ALLOW-SCORED-AD from Outside to Inside source any destination host-ad service any application [ ms-win-remote-management dns kerberos ldap active-directory ] action allow log-end yes
+set rulebase security rules 06-ALLOW-SCORED-AD from Outside to Inside source any destination host-ad service any application [ dns kerberos ldap active-directory msrpc ] action allow log-end yes
 
-# Outbound Workstation Access & Red Team Drops
-set rulebase security rules 07-OUTBOUND-DNS from Inside to Outside source net-internal destination any application dns service default action allow log-end yes
-set rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS from Inside to Outside source net-internal destination any service [ service-http service-https ] application [ web-browsing ssl apt-get yum curl wget ] action allow log-end yes
+# Outbound Workstation Access & Red Team Drops (Fixed App-IDs & service defaults)
+set rulebase security rules 07-OUTBOUND-DNS from Inside to Outside source net-internal destination any application dns service application-default action allow log-end yes
+set rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS from Inside to Outside source net-internal destination any service [ service-http service-https ] application [ web-browsing ssl ] action allow log-end yes
 set rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS from Inside to Outside source net-internal destination any service any application any action drop log-end yes
-set rulebase security rules 10-BLOCK-REDTEAM-MGMT from Outside to Inside source any destination ${INTERNAL_SUBNET} service any application [ ssh telnet ms-rdp vnc smb ] action reset-both log-end yes
+set rulebase security rules 10-BLOCK-REDTEAM-MGMT from Outside to Inside source any destination ${INTERNAL_SUBNET} service any application [ ssh telnet ms-rdp vnc ms-ds-smb ] action reset-both log-end yes
 set rulebase security rules 11-GLOBAL-DENY-ALL from any to any source any destination any service any application any action drop log-end yes
 
 # Rule Re-ordering
@@ -149,46 +147,50 @@ move rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS after 08-OUTBOUND-WEB-
 move rulebase security rules 10-BLOCK-REDTEAM-MGMT after 09-BLOCK-UNAUTHORIZED-EGRESS
 move rulebase security rules 11-GLOBAL-DENY-ALL bottom
 
-# Outbound NAT
-set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation interface-address interface ethernet1/1
+# Outbound NAT (Fixed dynamic-ip-and-port syntax)
+set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation dynamic-ip-and-port interface-address interface ethernet1/1
 
-# Splunk Forwarding & Auditing (To Local Splunk VM)
+# Splunk Forwarding & Auditing (Fixed Shared Log-Settings syntax)
+set shared log-settings syslog Splunk-Server server ${BASE_OCTETS}.20 transport TCP port 9997 format default facility LOG_LOCAL7
+set shared log-settings system match-list Splunk-Sys filter "All Logs" send-syslog Splunk-Server
+set shared log-settings config match-list Splunk-Cfg filter "All Logs" send-syslog Splunk-Server
 set deviceconfig setting management audit-enabled yes
 set deviceconfig setting management commit-audit-log yes
-set deviceconfig system syslog-server ${BASE_OCTETS}.20 transport tcp port 9997 format default facility local7
-set deviceconfig system syslog-server ${BASE_OCTETS}.20 log-type system
-set deviceconfig system syslog-server ${BASE_OCTETS}.20 log-type config
-set deviceconfig system syslog-server ${BASE_OCTETS}.20 log-type threat
-set deviceconfig system syslog-server ${BASE_OCTETS}.20 log-type traffic
 
-# Device Management Hardening
+# Device Management Hardening & Password Set via Hash
 set deviceconfig system permitted-ip ${INTERNAL_SUBNET}
-set mgt-config users admin password
-${NEW_PASS}
-${NEW_PASS}
+set mgt-config users admin phash "${ADMIN_HASH}"
 
 commit description "MWCCDC-Harden-With-Splunk"
 exit
-clear session all
 exit
 EOF
 
 echo "[*] Connecting to firewall to push configuration..."
 stream_commands() {
-  sleep 6
+  echo "[*] Waiting 15 seconds for PAN-OS shell to initialize..." >&2
+  sleep 15
+  echo ""
+  sleep 2
+
   echo "set cli scripting-mode on"
-  sleep 0.5
-  echo "set cli echo-input on"
-  sleep 0.5
+  sleep 1
   echo "set cli config-output-format set"
-  sleep 0.5
+  sleep 1
   echo "configure"
-  sleep 3
+  sleep 4
+  
   while IFS= read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     echo "$line"
-    if [[ "$line" =~ ^commit ]]; then sleep 12; else sleep 0.5; fi
+    if [[ "$line" =~ ^commit ]]; then 
+      echo "[*] Committing... Waiting 50 seconds for process to finish." >&2
+      sleep 50
+    else 
+      sleep 1
+    fi
   done < "${TMP_CMDS}"
+  
   sleep 2
 }
 
