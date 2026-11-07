@@ -98,11 +98,14 @@ set network interface ethernet ethernet1/2 layer3 ip ${BASE_OCTETS}.254/24
 set zone Outside network layer3 ethernet1/1
 set zone Inside network layer3 ethernet1/2
 
-# Default Route to VyOS (Metric 5 to override any existing DHCP default routes)
-set network virtual-router default routing-table ip static-route default-to-vyos nexthop ip-address 172.16.0.254
-set network virtual-router default routing-table ip static-route default-to-vyos destination 0.0.0.0/0
-set network virtual-router default routing-table ip static-route default-to-vyos interface ethernet1/1
-set network virtual-router default routing-table ip static-route default-to-vyos metric 5
+# Wipe any existing default routes to prevent "not unique" conflicts
+delete network virtual-router default routing-table ip static-route default-to-vyos
+delete network virtual-router default routing-table ip static-route default
+
+# Set the clean Default Route to VyOS
+set network virtual-router default routing-table ip static-route default nexthop ip-address 172.16.0.254
+set network virtual-router default routing-table ip static-route default destination 0.0.0.0/0
+set network virtual-router default routing-table ip static-route default interface ethernet1/1
 
 # Service & Scored Server Address Objects
 set service srv-splunk-mgmt protocol tcp port 8089
@@ -119,7 +122,7 @@ set address host-ad ip-netmask ${BASE_OCTETS}.100
 set address host-mssql ip-netmask ${BASE_OCTETS}.120
 set address net-internal ip-netmask ${INTERNAL_SUBNET}
 
-# Ingress Scored Rules (Fixed App-IDs)
+# Ingress Scored Rules
 set rulebase security rules 01-ALLOW-SCORED-ICMP from Outside to Inside source any destination [ host-ecom host-email host-splunk host-ad host-mssql ] service any application ping action allow log-end yes
 set rulebase security rules 02-ALLOW-SCORED-WEB from Outside to Inside source any destination [ host-ecom host-email ] service [ service-http service-https ] application [ web-browsing ssl ] action allow log-end yes
 set rulebase security rules 03-ALLOW-SCORED-MAIL from Outside to Inside source any destination host-email service any application [ smtp pop3 imap ] action allow log-end yes
@@ -127,7 +130,7 @@ set rulebase security rules 04-ALLOW-SCORED-SPLUNK from Outside to Inside source
 set rulebase security rules 05-ALLOW-SCORED-MSSQL from Outside to Inside source any destination host-mssql service [ srv-mssql srv-rdp srv-smb ] application any action allow log-end yes
 set rulebase security rules 06-ALLOW-SCORED-AD from Outside to Inside source any destination host-ad service any application [ dns kerberos ldap active-directory msrpc ] action allow log-end yes
 
-# Outbound Workstation Access & Red Team Drops (Fixed App-IDs & service defaults)
+# Outbound Workstation Access & Red Team Drops
 set rulebase security rules 07-OUTBOUND-DNS from Inside to Outside source net-internal destination any application dns service application-default action allow log-end yes
 set rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS from Inside to Outside source net-internal destination any service [ service-http service-https ] application [ web-browsing ssl ] action allow log-end yes
 set rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS from Inside to Outside source net-internal destination any service any application any action drop log-end yes
@@ -147,15 +150,13 @@ move rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS after 08-OUTBOUND-WEB-
 move rulebase security rules 10-BLOCK-REDTEAM-MGMT after 09-BLOCK-UNAUTHORIZED-EGRESS
 move rulebase security rules 11-GLOBAL-DENY-ALL bottom
 
-# Outbound NAT (Fixed dynamic-ip-and-port syntax)
+# Outbound NAT
 set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation dynamic-ip-and-port interface-address interface ethernet1/1
 
-# Splunk Forwarding & Auditing (Fixed Shared Log-Settings syntax)
-set shared log-settings syslog Splunk-Server server ${BASE_OCTETS}.20 transport TCP port 9997 format default facility LOG_LOCAL7
+# Splunk Forwarding (Fixed Format and References)
+set shared log-settings syslog Splunk-Server server ${BASE_OCTETS}.20 transport TCP port 9997 format BSD facility LOG_LOCAL7
 set shared log-settings system match-list Splunk-Sys filter "All Logs" send-syslog Splunk-Server
 set shared log-settings config match-list Splunk-Cfg filter "All Logs" send-syslog Splunk-Server
-set deviceconfig setting management audit-enabled yes
-set deviceconfig setting management commit-audit-log yes
 
 # Device Management Hardening & Password Set via Hash
 set deviceconfig system permitted-ip ${INTERNAL_SUBNET}
