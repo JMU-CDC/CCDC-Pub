@@ -105,9 +105,9 @@ delete network virtual-router default routing-table ip static-route Def-to-Vyos
 
 # Set the clean Default Route to VyOS using edit mode to bypass line-by-line validation
 edit network virtual-router default routing-table ip static-route default
-set destination 0.0.0.0/0
 set nexthop ip-address 172.16.0.254
 set interface ethernet1/1
+set destination 0.0.0.0/0
 set metric 5
 top
 
