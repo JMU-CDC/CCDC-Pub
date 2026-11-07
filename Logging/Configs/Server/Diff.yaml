@@ -192,13 +192,12 @@ sources:
       LET Base <= to_dict(item={
         SELECT K(c=ClientId, p=FullPath) AS _key, SHA256 AS _value
         FROM source(artifact="Custom.CCDC.Baseline/Lin.Persistence", hunt_id=BaseId) })
-      SELECT * FROM {
-        SELECT Host(c=ClientId) AS Host, FullPath, Mtime, Ctime, SHA256,
+      LET Rows = SELECT Host(c=ClientId) AS Host, FullPath, Mtime, Ctime, SHA256,
                if(condition=Base[K(c=ClientId, p=FullPath)] = NULL, then="NEW",
                   else=if(condition=Base[K(c=ClientId, p=FullPath)] != SHA256,
                           then="MODIFIED", else="touched-only")) AS Status
         FROM source(artifact="Custom.CCDC.Delta/Lin.Persistence", hunt_id=NowId)
-      } WHERE Status != "touched-only"
+      SELECT * FROM Rows WHERE Status != "touched-only"
 
   - name: Diff.Lin.SUID
     query: |
@@ -246,7 +245,7 @@ sources:
       -- suspicious content first; every row is a web file changed since SinceTime
       SELECT Host(c=ClientId) AS Host, FullPath, Size, Mtime, Ctime, Suspect, SHA256
       FROM source(artifact="Custom.CCDC.Delta/Lin.WebRoot", hunt_id=NowId)
-      ORDER BY Suspect DESC, Ctime DESC
+      ORDER BY Suspect DESC
 
   - name: Triage.Lin.ProcSuspect
     query: |
@@ -264,11 +263,12 @@ sources:
   - name: Triage.Win.Timeline
     query: |
       -- account / group / service / task / audit-policy / log-clear changes, in order
+      LET TimelineIds <= (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4738, 4740, 4756,
+                          4697, 4698, 4699, 4702, 4719, 1102)
       SELECT EventTime, Host(c=ClientId) AS Host, Computer, EventID,
              SubjectUser, TargetUser, SrcIP, NewProc, CmdLine
       FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
-      WHERE EventID IN [4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4738, 4740, 4756,
-                        4697, 4698, 4699, 4702, 4719, 1102]
+      WHERE EventID IN TimelineIds
       ORDER BY EventTime
 
   - name: Triage.Win.BruteForce
@@ -278,22 +278,23 @@ sources:
         SELECT format(format="%v|%v", args=[SrcIP, TargetUser]) AS _key, TRUE AS _value
         FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
         WHERE EventID = 4624 })
-      SELECT * FROM {
-        SELECT SrcIP, TargetUser, count() AS Failures,
+      LET Fails = SELECT SrcIP, TargetUser, count() AS Failures,
                Wins[format(format="%v|%v", args=[SrcIP, TargetUser])] AS ThenSucceeded
         FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
         WHERE EventID = 4625
         GROUP BY SrcIP, TargetUser
-      } WHERE Failures > BruteForceThreshold
+      SELECT * FROM Fails
+      WHERE Failures > BruteForceThreshold
       ORDER BY Failures DESC
 
   - name: Triage.Win.LogonsBySource
     query: |
       -- who is logging on to what, from where (successes, non-machine accounts)
+      LET LocalSrc <= ("-", "::1", "127.0.0.1")
       SELECT SrcIP, TargetUser, LogonType, Computer, count() AS Count,
              min(item=EventTime) AS First, max(item=EventTime) AS Last
       FROM source(artifact="Custom.CCDC.Delta/Win.Security", hunt_id=NowId)
-      WHERE EventID = 4624 AND NOT SrcIP IN ["-", "::1", "127.0.0.1"]
+      WHERE EventID = 4624 AND NOT SrcIP IN LocalSrc
       GROUP BY SrcIP, TargetUser, LogonType, Computer
       ORDER BY Count DESC
 

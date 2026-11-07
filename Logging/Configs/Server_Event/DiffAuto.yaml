@@ -39,33 +39,35 @@ parameters:
 sources:
   - name: Differ
     query: |
+      LET Latest = SELECT HuntId, Created FROM hunts()
+                   WHERE "Custom.CCDC.Delta" IN Artifacts
+                   ORDER BY Created DESC LIMIT 1
+      LET Id = Latest[0].HuntId
+      LET AgeSeconds = now().Unix - timestamp(epoch=Latest[0].Created).Unix
+
       SELECT * FROM foreach(
         row={ SELECT * FROM clock(period=PollSeconds) },
         query={
-          LET Latest <= SELECT HuntId, Created FROM hunts()
-                        WHERE "Custom.CCDC.Delta" IN Artifacts
-                        ORDER BY Created DESC LIMIT 1
-          LET Id = Latest[0].HuntId
-          LET AgeSeconds = now().Unix - timestamp(epoch=Latest[0].Created).Unix
           SELECT Id AS NowHunt,
                  collect_client(client_id="server", artifacts="Custom.CCDC.Diff",
                                 env=dict(NowHunt=Id)).flow_id AS DiffFlow,
                  server_set_metadata(metadata=dict(ccdc_last_diffed=Id)) AS _marked
           FROM scope()
           WHERE Id AND AgeSeconds > SettleSeconds
-            AND Id != server_metadata().ccdc_last_diffed
+            AND NOT Id = server_metadata().ccdc_last_diffed
         })
 
   - name: Launcher
     query: |
+      LET Last = server_metadata().ccdc_last_launch
+      LET Since = format(format="%v",
+                         args=[timestamp(epoch=int(int=Last) - DeltaOverlapSeconds)])
+
       SELECT * FROM if(condition=LaunchDeltaEverySeconds > 0,
         then={
           SELECT * FROM foreach(
             row={ SELECT * FROM clock(period=LaunchDeltaEverySeconds) },
             query={
-              LET Last <= server_metadata().ccdc_last_launch
-              LET Since = format(format="%v",
-                  args=timestamp(epoch=int(int=Last) - DeltaOverlapSeconds))
               SELECT if(condition=Last,
                         then=hunt(description="CCDC Delta (auto)",
                                   artifacts="Custom.CCDC.Delta",
