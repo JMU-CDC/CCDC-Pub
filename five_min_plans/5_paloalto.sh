@@ -97,6 +97,7 @@ set network interface ethernet ethernet1/1 layer3 ip 172.16.0.1/24
 set network interface ethernet ethernet1/2 layer3 ip ${BASE_OCTETS}.254/24
 set zone Outside network layer3 ethernet1/1
 set zone Inside network layer3 ethernet1/2
+set network virtual-router default interface [ ethernet1/1 ethernet1/2 ]
 
 # Wipe any existing default routes to prevent "not unique" conflicts
 delete network virtual-router default routing-table ip static-route default-to-vyos
@@ -134,10 +135,10 @@ set rulebase security rules 04-ALLOW-SCORED-SPLUNK from Outside to Inside source
 set rulebase security rules 05-ALLOW-SCORED-MSSQL from Outside to Inside source any destination host-mssql service [ srv-mssql srv-rdp srv-smb ] application any action allow log-end yes
 set rulebase security rules 06-ALLOW-SCORED-AD from Outside to Inside source any destination host-ad service any application [ dns kerberos ldap active-directory msrpc ] action allow log-end yes
 
-# Outbound Workstation Access & Red Team Drops (App-ID relaxed for outbound web)
+# Outbound Workstation Access & Red Team Drops
 set rulebase security rules 07-OUTBOUND-DNS from Inside to Outside source net-internal destination any application dns service application-default action allow log-end yes
 set rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS from Inside to Outside source net-internal destination any service [ service-http service-https ] application any action allow log-end yes
-set rulebase security rules 08.5-OUTBOUND-PING from Inside to Outside source net-internal destination any application ping service application-default action allow log-end yes
+set rulebase security rules 08.5-OUTBOUND-PING from Inside to Outside source net-internal destination any application ping service any action allow log-end yes
 set rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS from Inside to Outside source net-internal destination any service any application any action drop log-end yes
 set rulebase security rules 10-BLOCK-REDTEAM-MGMT from Outside to Inside source any destination ${INTERNAL_SUBNET} service any application [ ssh telnet ms-rdp vnc ms-ds-smb ] action reset-both log-end yes
 set rulebase security rules 11-GLOBAL-DENY-ALL from any to any source any destination any service any application any action drop log-end yes
@@ -155,10 +156,6 @@ move rulebase security rules 08.5-OUTBOUND-PING after 08-OUTBOUND-WEB-DOWNLOADS
 move rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS after 08.5-OUTBOUND-PING
 move rulebase security rules 10-BLOCK-REDTEAM-MGMT after 09-BLOCK-UNAUTHORIZED-EGRESS
 move rulebase security rules 11-GLOBAL-DENY-ALL bottom
-
-# Outbound NAT (Explicit IP used and rule forced to the top)
-set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation dynamic-ip-and-port interface-address ip 172.16.0.1/24
-move rulebase nat rules LAN-TO-TRANSIT-NAT top
 
 # Splunk Forwarding
 set shared log-settings syslog Splunk-Server server Splunk-Node server ${BASE_OCTETS}.20 transport TCP port 9997 format BSD facility LOG_LOCAL7
