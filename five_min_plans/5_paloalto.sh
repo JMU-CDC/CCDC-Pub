@@ -119,6 +119,8 @@ set service srv-winrm-http protocol tcp port 5985
 set service srv-winrm-https protocol tcp port 5986
 set service srv-rdp protocol tcp port 3389
 set service srv-smb protocol tcp port 445
+set service srv-ftp protocol tcp port 21
+set service srv-ssh protocol tcp port 22
 
 set address host-ecom ip-netmask ${BASE_OCTETS}.10
 set address host-email ip-netmask ${BASE_OCTETS}.15
@@ -134,6 +136,9 @@ set rulebase security rules 03-ALLOW-SCORED-MAIL from Outside to Inside source a
 set rulebase security rules 04-ALLOW-SCORED-SPLUNK from Outside to Inside source any destination host-splunk service [ service-http service-https srv-splunk-mgmt ] application any action allow log-end yes
 set rulebase security rules 05-ALLOW-SCORED-MSSQL from Outside to Inside source any destination host-mssql service [ srv-mssql srv-rdp srv-smb ] application any action allow log-end yes
 set rulebase security rules 06-ALLOW-SCORED-AD from Outside to Inside source any destination host-ad service any application [ dns kerberos ldap active-directory msrpc ] action allow log-end yes
+set rulebase security rules 06.1-ALLOW-SCORED-FTP from Outside to Inside source any destination [ host-ecom host-email host-splunk host-ad host-mssql ] service srv-ftp application ftp action allow log-end yes
+set rulebase security rules 06.2-ALLOW-SCORED-SSH from Outside to Inside source any destination [ host-ecom host-email host-splunk host-ad host-mssql ] service srv-ssh application ssh action allow log-end yes
+set rulebase security rules 06.3-ALLOW-SCORED-WINRM from Outside to Inside source any destination host-ad service [ srv-winrm-http srv-winrm-https ] application any action allow log-end yes
 
 # Outbound Workstation Access & Red Team Drops
 set rulebase security rules 07-OUTBOUND-DNS from Inside to Outside source net-internal destination any application dns service application-default action allow log-end yes
@@ -150,7 +155,10 @@ move rulebase security rules 03-ALLOW-SCORED-MAIL after 02-ALLOW-SCORED-WEB
 move rulebase security rules 04-ALLOW-SCORED-SPLUNK after 03-ALLOW-SCORED-MAIL
 move rulebase security rules 05-ALLOW-SCORED-MSSQL after 04-ALLOW-SCORED-SPLUNK
 move rulebase security rules 06-ALLOW-SCORED-AD after 05-ALLOW-SCORED-MSSQL
-move rulebase security rules 07-OUTBOUND-DNS after 06-ALLOW-SCORED-AD
+move rulebase security rules 06.1-ALLOW-SCORED-FTP after 06-ALLOW-SCORED-AD
+move rulebase security rules 06.2-ALLOW-SCORED-SSH after 06.1-ALLOW-SCORED-FTP
+move rulebase security rules 06.3-ALLOW-SCORED-WINRM after 06.2-ALLOW-SCORED-SSH
+move rulebase security rules 07-OUTBOUND-DNS after 06.3-ALLOW-SCORED-WINRM
 move rulebase security rules 08-OUTBOUND-WEB-DOWNLOADS after 07-OUTBOUND-DNS
 move rulebase security rules 08.5-OUTBOUND-PING after 08-OUTBOUND-WEB-DOWNLOADS
 move rulebase security rules 09-BLOCK-UNAUTHORIZED-EGRESS after 08.5-OUTBOUND-PING
