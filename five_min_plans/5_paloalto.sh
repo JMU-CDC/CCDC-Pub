@@ -101,11 +101,15 @@ set zone Inside network layer3 ethernet1/2
 # Wipe any existing default routes to prevent "not unique" conflicts
 delete network virtual-router default routing-table ip static-route default-to-vyos
 delete network virtual-router default routing-table ip static-route default
+delete network virtual-router default routing-table ip static-route Def-to-Vyos
 
-# Set the clean Default Route to VyOS
-set network virtual-router default routing-table ip static-route default nexthop ip-address 172.16.0.254
-set network virtual-router default routing-table ip static-route default destination 0.0.0.0/0
-set network virtual-router default routing-table ip static-route default interface ethernet1/1
+# Set the clean Default Route to VyOS using edit mode to bypass line-by-line validation
+edit network virtual-router default routing-table ip static-route default
+set destination 0.0.0.0/0
+set nexthop ip-address 172.16.0.254
+set interface ethernet1/1
+set metric 5
+top
 
 # Service & Scored Server Address Objects
 set service srv-splunk-mgmt protocol tcp port 8089
@@ -154,7 +158,7 @@ move rulebase security rules 11-GLOBAL-DENY-ALL bottom
 set rulebase nat rules LAN-TO-TRANSIT-NAT from Inside to Outside source net-internal destination any service any to-interface ethernet1/1 source-translation dynamic-ip-and-port interface-address interface ethernet1/1
 
 # Splunk Forwarding
-set shared log-settings syslog Splunk-Server server ${BASE_OCTETS}.20 transport TCP port 9997 format BSD facility LOG_LOCAL7
+set shared log-settings syslog Splunk-Server server Splunk-Node server ${BASE_OCTETS}.20 transport TCP port 9997 format BSD facility LOG_LOCAL7
 set shared log-settings system match-list Splunk-Sys filter "All Logs" send-syslog Splunk-Server
 set shared log-settings config match-list Splunk-Cfg filter "All Logs" send-syslog Splunk-Server
 
@@ -183,7 +187,6 @@ stream_commands() {
   while IFS= read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     echo "$line"
-    # Unified 1-second delay since commit is removed
     sleep 1
   done < "${TMP_CMDS}"
   
@@ -207,12 +210,17 @@ echo " To apply these changes and lock down the firewall, you MUST run:"
 echo ""
 echo "   1. Log into the firewall:"
 echo "      ssh admin@${PA_IP}"
-echo "      (Use your NEW password: ${NEW_PASS})"
+echo "      (Use the NEW password you set at the beginning of this script)"
 echo ""
 echo "   2. Enter config mode:"
 echo "      configure"
 echo ""
-echo "   3. Commit the changes:"
-echo "      commit description \"MWCCDC-Harden-With-Splunk\""
+echo "   3. Verify static routes (catch hidden organizer duplicate routes):"
+echo "      show network virtual-router default routing-table ip static-route"
+echo "      (If any route besides 'default' points to 0.0.0.0/0, delete it!)"
+echo "      (Example: delete network virtual-router default routing-table ip static-route Bad-Route)"
+echo ""
+echo "   4. Commit the changes:"
+echo "      commit description \"MWCCDC-Harden\""
 echo "======================================================================="
 echo ""
