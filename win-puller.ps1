@@ -11,7 +11,7 @@
     Interactive menu mode to select individual items, multiple items, or presets.
 
 .EXAMPLE
-    .\win-puller.ps1 -Selection "1,4,8" -Destination "C:\Tools"
+    .\win-puller.ps1 -Selection "1,4,7,8" -Destination "C:\Tools"
 
 .EXAMPLE
     .\win-puller.ps1 -Plans -Destination "C:\CCDC"
@@ -85,13 +85,21 @@ $Manifest = @(
     [PSCustomObject]@{
         Id          = 4
         Category    = "Scripts"
+        Name        = "Find-LateralMovement.ps1"
+        RelativeUri = "Windows/Scripts/Find-LateralMovement.ps1"
+        Size        = "14 KB"
+        Description = "Triage logs/EVTX for lateral movement leads"
+    },
+    [PSCustomObject]@{
+        Id          = 5
+        Category    = "Scripts"
         Name        = "Find-LinksAndAliases.ps1"
         RelativeUri = "Windows/Scripts/Find-LinksAndAliases.ps1"
         Size        = "16 KB"
         Description = "Audit junctions, symlinks, and aliases"
     },
     [PSCustomObject]@{
-        Id          = 5
+        Id          = 6
         Category    = "Scripts"
         Name        = "PrivescCheck.ps1"
         RelativeUri = "Windows/Scripts/PrivescCheck.ps1"
@@ -99,7 +107,23 @@ $Manifest = @(
         Description = "Windows privilege escalation enumeration"
     },
     [PSCustomObject]@{
-        Id          = 6
+        Id          = 7
+        Category    = "Scripts"
+        Name        = "Set-ADGPO.ps1"
+        RelativeUri = "Windows/Scripts/Set-ADGPO.ps1"
+        Size        = "14 KB"
+        Description = "Create and link hardening GPO in Active Directory"
+    },
+    [PSCustomObject]@{
+        Id          = 8
+        Category    = "Scripts"
+        Name        = "Set-LogonBanner.ps1"
+        RelativeUri = "Windows/Scripts/Set-LogonBanner.ps1"
+        Size        = "8 KB"
+        Description = "Configure interactive logon warning locally or via GPO"
+    },
+    [PSCustomObject]@{
+        Id          = 9
         Category    = "Scripts"
         Name        = "Setup-Sysmon.ps1"
         RelativeUri = "Windows/Scripts/Setup-Sysmon.ps1"
@@ -107,7 +131,7 @@ $Manifest = @(
         Description = "Automated Sysmon installer / updater"
     },
     [PSCustomObject]@{
-        Id          = 7
+        Id          = 10
         Category    = "Scripts"
         Name        = "sysmonconfig.xml"
         RelativeUri = "Windows/Scripts/sysmonconfig.xml"
@@ -117,7 +141,7 @@ $Manifest = @(
 
     # --- Windows Tools ---
     [PSCustomObject]@{
-        Id          = 8
+        Id          = 11
         Category    = "Tools"
         Name        = "BLUESPAWN-client-x64.zip"
         RelativeUri = "Windows/Tools/BLUESPAWN-client-x64.zip"
@@ -125,7 +149,7 @@ $Manifest = @(
         Description = "EDR & active defense tool"
     },
     [PSCustomObject]@{
-        Id          = 9
+        Id          = 12
         Category    = "Tools"
         Name        = "Firefox Setup 158.0.1.msi"
         RelativeUri = "Windows/Tools/Firefox Setup 158.0.1.msi"
@@ -133,7 +157,7 @@ $Manifest = @(
         Description = "Firefox browser installer"
     },
     [PSCustomObject]@{
-        Id          = 10
+        Id          = 13
         Category    = "Tools"
         Name        = "floss.exe"
         RelativeUri = "Windows/Tools/floss.exe"
@@ -141,7 +165,7 @@ $Manifest = @(
         Description = "FLARE Obfuscated String Solver"
     },
     [PSCustomObject]@{
-        Id          = 11
+        Id          = 14
         Category    = "Tools"
         Name        = "optisys_x64.zip"
         RelativeUri = "Windows/Tools/optisys_x64.zip"
@@ -149,7 +173,7 @@ $Manifest = @(
         Description = "Process and system inspection utility"
     },
     [PSCustomObject]@{
-        Id          = 12
+        Id          = 15
         Category    = "Tools"
         Name        = "systeminformer.zip"
         RelativeUri = "Windows/Tools/systeminformer.zip"
@@ -157,7 +181,7 @@ $Manifest = @(
         Description = "Process Hacker / System Informer"
     },
     [PSCustomObject]@{
-        Id          = 13
+        Id          = 16
         Category    = "Tools"
         Name        = "Wireshark-4.6.8-x64.exe"
         RelativeUri = "Windows/Tools/Wireshark-4.6.8-x64.exe"
@@ -167,7 +191,7 @@ $Manifest = @(
 
     # --- Windows Logging Packages ---
     [PSCustomObject]@{
-        Id          = 14
+        Id          = 17
         Category    = "Logging"
         Name        = "InstallClientWindows.zip"
         RelativeUri = "Logging/Scripts/InstallClientWindows.zip"
@@ -175,7 +199,7 @@ $Manifest = @(
         Description = "Velociraptor/Logging Windows Client installer"
     },
     [PSCustomObject]@{
-        Id          = 15
+        Id          = 18
         Category    = "Logging"
         Name        = "InstallServerWindows.zip"
         RelativeUri = "Logging/Scripts/InstallServerWindows.zip"
@@ -231,13 +255,13 @@ function Show-Menu {
     Write-Host "  [ P] " -ForegroundColor Cyan -NoNewline
     Write-Host "Download ALL 5-Minute Plans (1-3)" -ForegroundColor White
     Write-Host "  [ S] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Scripts (4-7)" -ForegroundColor White
+    Write-Host "Download ALL Scripts (4-10)" -ForegroundColor White
     Write-Host "  [ T] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Tools (8-13)" -ForegroundColor White
+    Write-Host "Download ALL Tools (11-16)" -ForegroundColor White
     Write-Host "  [ L] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Logging Packages (14-15)" -ForegroundColor White
+    Write-Host "Download ALL Logging Packages (17-18)" -ForegroundColor White
     Write-Host "  [ A] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Items (1-15)" -ForegroundColor White
+    Write-Host "Download ALL Items (1-18)" -ForegroundColor White
     Write-Host "  [ Q] " -ForegroundColor Cyan -NoNewline
     Write-Host "Quit" -ForegroundColor White
     Write-Host "-----------------------------------------------------------------" -ForegroundColor Cyan
@@ -287,7 +311,7 @@ function Download-FileWithProgress {
 # Determine selection if running interactively
 if (-not $All -and -not $Plans -and -not $Scripts -and -not $Tools -and -not $Logging -and [string]::IsNullOrWhiteSpace($Selection)) {
     Show-Menu
-    $rawChoice = Read-Host "`nEnter selection (e.g. 1,4,8 or 1-3,8 or P/S/T/L/A/Q)"
+    $rawChoice = Read-Host "`nEnter selection (e.g. 1,4,7 or 1-3,8 or P/S/T/L/A/Q)"
     if ([string]::IsNullOrWhiteSpace($rawChoice) -or $rawChoice.Trim().ToUpper() -eq 'Q') {
         Write-Host "Exiting. No files downloaded." -ForegroundColor Yellow
         return
