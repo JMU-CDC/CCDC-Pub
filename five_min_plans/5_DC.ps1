@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 #Requires -RunAsAdministrator
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
@@ -898,6 +898,48 @@ function Set-AllowRule {
     })
 }
 
+function Set-NativeFirewallBlockRule {
+    param([string]$RuleName, [ValidateSet('TCP','UDP')][string]$Protocol, [string[]]$Port)
+    $operation = 'read existing native firewall policy'
+    try {
+        $policy = Get-NativeFirewallPolicy
+        $protocolNumber = @{TCP=6;UDP=17}[$Protocol]
+        $operation = 'enumerate existing rules'
+        $existing = @($policy.Rules | Where-Object Name -eq $RuleName)
+        if ($existing.Count -gt 1) { throw "Multiple firewall rules are named $RuleName; review them before changing policy." }
+        if ($existing.Count -and ([int]$existing[0].Protocol -ne $protocolNumber -or $existing[0].ApplicationName -or $existing[0].ServiceName)) {
+            throw "Existing rule $RuleName has a different protocol or an application/service restriction; review it manually."
+        }
+        $arguments = @('advfirewall','firewall',$(if ($existing.Count) { 'set' } else { 'add' }),'rule',"name=$RuleName")
+        if ($existing.Count) { $arguments += 'new' }
+        $arguments += @('dir=in','action=block','enable=yes','profile=any','localip=any',
+            'remoteip=any','interfacetype=any','edge=no',
+            'description=CCDC domain controller explicit inbound block (not scored)',
+            "protocol=$Protocol","localport=$($Port -join ',')",'remoteport=any')
+        $operation = 'write block rule with netsh'
+        Invoke-FirewallNetsh -Arguments $arguments
+        $operation = 'read back rule after netsh succeeded'
+        $policy = Get-NativeFirewallPolicy
+        $verified = $policy.Rules.Item($RuleName)
+        if (!$verified.Enabled -or [int]$verified.Direction -ne 1 -or [int]$verified.Action -ne 0 -or
+            [int]$verified.Protocol -ne $protocolNumber -or [int]$verified.Profiles -ne 2147483647 -or
+            $verified.ApplicationName -or $verified.ServiceName) {
+            throw "Native firewall block rule $RuleName failed readback verification."
+        }
+        if ((([string]$verified.LocalPorts -split ',' | Sort-Object) -join ',') -ne (($Port | Sort-Object) -join ',')) {
+            throw "Native firewall block rule $RuleName port readback did not match."
+        }
+    } catch { throw "Firewall block rule '$RuleName' failed during '${operation}': $($_.Exception.Message) [$($_.FullyQualifiedErrorId)]" }
+}
+
+function Set-BlockRule {
+    param([string]$Name, [string]$Protocol, [string[]]$Port)
+    $ruleName = "CCDC-AD-Block-$Name"
+    return (Invoke-Step "Block $Protocol ports $($Port -join ',') (not scored) [$ruleName]" {
+        Set-NativeFirewallBlockRule -RuleName $ruleName -Protocol $Protocol -Port $Port
+    })
+}
+
 function Set-NativeFirewallProfiles {
     param([ValidateSet('Enabled','DefaultPolicy','Logging')][string]$Setting)
     $policy = Get-NativeFirewallPolicy
@@ -944,14 +986,45 @@ function Invoke-BaselineNative {
     return $output
 }
 
+function Invoke-DiscoveryQuery {
+    param([string]$StageName, [scriptblock]$Query,
+        [ValidateRange(1,120)][int]$TimeoutSeconds=15)
+    Write-Host "[Discovery] $StageName (query wait limit: $TimeoutSeconds seconds)" -ForegroundColor Cyan
+    $job = $null
+    try {
+        $job = Start-Job -ScriptBlock {
+            param([string]$QueryText)
+            $ErrorActionPreference = 'Stop'
+            & ([scriptblock]::Create($QueryText))
+        } -ArgumentList $Query.ToString() -ErrorAction Stop
+        $finished = Wait-Job -Job $job -Timeout $TimeoutSeconds -ErrorAction Stop
+        if (!$finished) { throw "$StageName timed out after $TimeoutSeconds seconds; its inventory is unavailable." }
+        if ($job.State -ne 'Completed') {
+            $reason = $job.ChildJobs[0].JobStateInfo.Reason
+            throw "$StageName query ended in state $($job.State): $reason"
+        }
+        Receive-Job -Job $job -ErrorAction Stop
+        Write-Host "[Discovery] $StageName finished."
+    } catch {
+        Write-Warning $_.Exception.Message
+        throw
+    } finally {
+        if ($null -ne $job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Get-ServiceBaseline {
     $issues = New-Object 'System.Collections.Generic.List[object]'
     $services = @()
     $processes = @()
     try {
-        $services = @(Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name,DisplayName,State,StartMode,StartName,PathName,ProcessId)
+        $services = @(Invoke-DiscoveryQuery 'Windows services (CIM)' {
+            Get-CimInstance Win32_Service -OperationTimeoutSec 10 -ErrorAction Stop |
+                Select-Object Name,DisplayName,State,StartMode,StartName,PathName,ProcessId
+        })
     } catch {
         $issues.Add([pscustomobject]@{Source='Service CIM fallback';Status='ManualRequired';Error="CIM failed: $($_.Exception.Message) Using Service Control Manager and registry; service process IDs are unavailable."})
+        Write-Host '[Discovery] Reading service names/configuration through Service Control Manager and the registry.'
         $startModes = @{0='Boot';1='System';2='Auto';3='Manual';4='Disabled'}
         $services = @(foreach ($service in (Get-Service -ErrorAction Stop)) {
             $configuration = $null
@@ -969,9 +1042,13 @@ function Get-ServiceBaseline {
         if (!$services.Count) { throw 'CIM service discovery failed and Service Control Manager returned no services. Backups cannot be selected reliably.' }
     }
     try {
-        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine)
+        $processes = @(Invoke-DiscoveryQuery 'Processes (CIM)' {
+            Get-CimInstance Win32_Process -OperationTimeoutSec 10 -ErrorAction Stop |
+                Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine
+        })
     } catch {
         $issues.Add([pscustomobject]@{Source='Process CIM fallback';Status='ManualRequired';Error="CIM failed: $($_.Exception.Message) Using Get-Process; parent process IDs and command lines are unavailable."})
+        Write-Host '[Discovery] Reading processes through Get-Process.'
         try {
             $processes = @(Get-Process -ErrorAction Stop | Select-Object Name,@{Name='ProcessId';Expression={$_.Id}},@{Name='ParentProcessId';Expression={$null}},@{Name='ExecutablePath';Expression={$_.Path}},@{Name='CommandLine';Expression={$null}})
         } catch {
@@ -982,7 +1059,11 @@ function Get-ServiceBaseline {
     $hints = @{21='FTP';22='SSH';25='SMTP';53='DNS';80='HTTP';110='POP3';123='NTP';143='IMAP';389='LDAP';443='HTTPS';445='SMB';636='LDAPS';1433='SQL';3389='RDP';5985='WinRM HTTP';5986='WinRM HTTPS';8000='Possible Splunk web';8089='Possible Splunk management';9997='Possible Splunk receiver'}
     foreach ($protocol in 'TCP','UDP') {
         try {
-            $items = if ($protocol -eq 'TCP') { @(Get-NetTCPConnection -State Listen -ErrorAction Stop) } else { @(Get-NetUDPEndpoint -ErrorAction Stop) }
+            $items = if ($protocol -eq 'TCP') {
+                @(Invoke-DiscoveryQuery 'TCP listeners' { Get-NetTCPConnection -State Listen -ErrorAction Stop })
+            } else {
+                @(Invoke-DiscoveryQuery 'UDP endpoints' { Get-NetUDPEndpoint -ErrorAction Stop })
+            }
             foreach ($item in $items) {
                 $processId = [int]$item.OwningProcess
                 $endpoints.Add([pscustomobject]@{
@@ -996,20 +1077,36 @@ function Get-ServiceBaseline {
     }
     $shares = @()
     if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
-        try { $shares = @(Get-SmbShare -ErrorAction Stop | Select-Object Name,Path,Description,Special,ScopeName) }
+        try {
+            $shares = @(Invoke-DiscoveryQuery 'SMB shares' {
+                Get-SmbShare -ErrorAction Stop | Select-Object Name,Path,Description,Special,ScopeName
+            })
+        }
         catch { $issues.Add([pscustomobject]@{Source='SMB shares';Error=$_.Exception.Message}) }
     }
     $features = @()
     if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
-        try { $features = @(Get-WindowsFeature -ErrorAction Stop | Where-Object Installed | Select-Object Name,DisplayName) }
+        try {
+            $features = @(Invoke-DiscoveryQuery 'Installed Windows roles/features' -TimeoutSeconds 30 {
+                Get-WindowsFeature -ErrorAction Stop | Where-Object Installed | Select-Object Name,DisplayName
+            })
+        }
         catch { $issues.Add([pscustomobject]@{Source='Windows roles/features';Error=$_.Exception.Message}) }
     }
     $appcmd = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
     $sites = ''; $vdirs = ''; $roots = @()
     if (Test-Path -LiteralPath $appcmd) {
         try {
-            $sites = (Invoke-BaselineNative $appcmd @('list','site','/xml')) -join [Environment]::NewLine
-            $vdirs = (Invoke-BaselineNative $appcmd @('list','vdir','/xml')) -join [Environment]::NewLine
+            $iis = Invoke-DiscoveryQuery 'IIS/FTP sites and virtual directories' {
+                $tool = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
+                $siteOutput = @(& $tool list site /xml 2>&1)
+                if ($LASTEXITCODE -ne 0) { throw "IIS site query failed: $($siteOutput -join ' ')" }
+                $vdirOutput = @(& $tool list vdir /xml 2>&1)
+                if ($LASTEXITCODE -ne 0) { throw "IIS directory query failed: $($vdirOutput -join ' ')" }
+                [pscustomobject]@{Sites=($siteOutput -join [Environment]::NewLine);Vdirs=($vdirOutput -join [Environment]::NewLine)}
+            }
+            $sites = $iis.Sites
+            $vdirs = $iis.Vdirs
             [xml]$parsed = $vdirs
             $roots = @($parsed.SelectNodes('/appcmd/VDIR') | ForEach-Object { $_.GetAttribute('physicalPath') } | Where-Object { $_ } | Sort-Object -Unique)
         } catch { $issues.Add([pscustomobject]@{Source='IIS/FTP site discovery';Error=$_.Exception.Message}) }
@@ -1451,6 +1548,62 @@ if ($Mode -ne 'Audit') {
     $icmpReady = Invoke-Step 'Allow inbound ICMPv4 echo requests for reachability/scoring checks' {
         Set-NativeFirewallAllowRule -RuleName CCDC-AD-ICMP -Protocol ICMPv4 -Address @('Any')
     }
+    # RDP (3389) is confirmed not scored on the DC; block it explicitly rather than relying solely on the default-deny policy.
+    Set-BlockRule 'RDP' TCP @('3389') | Out-Null
+
+    # Zero-risk explicit blocks: not scored on DC, no AD service dependency on any of these inbound to the DC.
+    Set-BlockRule 'SSH'             TCP @('22')       | Out-Null  # Scored on Splunk/Webmail hosts only
+    Set-BlockRule 'Telnet'          TCP @('23')       | Out-Null  # Never needed
+    Set-BlockRule 'FTP'             TCP @('20','21')  | Out-Null  # No FTP on DC
+    Set-BlockRule 'MSSQL'           TCP @('1433')     | Out-Null  # MSSQL is on its own host; auth uses Kerberos/LDAP (already allowed)
+    Set-BlockRule 'NetBIOS-Session' TCP @('139')      | Out-Null  # Modern Windows uses 445; NIC-level NetBIOS also being disabled
+
+    # Conditional block: SMTP (25)
+    # Query runs BEFORE the approval prompt so you can read the output and decide.
+    Write-Host "`n[Pre-check] SMTP (25) inbound block - querying DC count and replication site links..." -ForegroundColor Cyan
+    $script:SmtpAllDCs   = @(Get-ADDomainController -Filter * -Server $adServer -ErrorAction Stop)
+    $script:SmtpLinks    = @()
+    try {
+        $script:SmtpLinks = @(Get-ADReplicationSiteLink -Filter * -Server $adServer -ErrorAction Stop |
+            Where-Object { [string]$_.ReplicationMethod -eq 'SMTP' })
+    } catch { Write-Warning "Could not query AD replication site links: $($_.Exception.Message)" }
+    $script:SmtpAllDCs | Select-Object HostName,Site,IsReadOnly | Format-Table -AutoSize | Out-Host
+    if ($script:SmtpLinks.Count) {
+        Write-Warning "SMTP site links found: $($script:SmtpLinks.Name -join ', '). Blocking port 25 WILL break inter-site AD replication. Type n to skip."
+    } else {
+        Write-Host "No SMTP site links found. Replication is RPC-only - safe to block port 25. Press Enter to apply." -ForegroundColor Green
+    }
+    Invoke-Step 'Block SMTP (25) inbound (review pre-check output above before approving)' {
+        if ($script:SmtpLinks.Count) {
+            throw "SMTP-based site links exist ($($script:SmtpLinks.Name -join ', ')). Block was not applied."
+        }
+        Set-NativeFirewallBlockRule -RuleName 'CCDC-AD-Block-SMTP' -Protocol TCP -Port @('25')
+    } | Out-Null
+
+    # Conditional block: HTTP/HTTPS (80/443)
+    # Query runs BEFORE the approval prompt so you can read the output and decide.
+    Write-Host "`n[Pre-check] HTTP/HTTPS (80/443) inbound block - querying AD CS and IIS service state..." -ForegroundColor Cyan
+    $script:HttpCertSvc = Get-Service -Name CertSvc -ErrorAction SilentlyContinue
+    $script:HttpW3Svc   = Get-Service -Name W3SVC   -ErrorAction SilentlyContinue
+    Write-Host "CertSvc (AD CS): $(if ($script:HttpCertSvc) { $script:HttpCertSvc.Status } else { 'Not installed' })"
+    Write-Host "W3SVC   (IIS)  : $(if ($script:HttpW3Svc)   { $script:HttpW3Svc.Status   } else { 'Not installed' })"
+    $script:HttpWebEnrollRisk = ($script:HttpCertSvc -and $script:HttpCertSvc.Status -eq 'Running' -and
+                                  $script:HttpW3Svc   -and $script:HttpW3Svc.Status   -eq 'Running')
+    if ($script:HttpWebEnrollRisk) {
+        Write-Warning "Both AD CS and IIS are running. Web Enrollment is likely active on 80/443. Blocking WILL break certificate services. Type n to skip."
+    } elseif ($script:HttpCertSvc -and $script:HttpCertSvc.Status -eq 'Running') {
+        Write-Warning "AD CS is running but IIS is absent/stopped. Web Enrollment is likely inactive, but verify before approving."
+    } else {
+        Write-Host "Neither AD CS Web Enrollment nor IIS detected as active - safe to block. Press Enter to apply." -ForegroundColor Green
+    }
+    Invoke-Step 'Block HTTP/HTTPS (80/443) inbound (review pre-check output above before approving)' {
+        if ($script:HttpWebEnrollRisk) {
+            throw 'AD CS and IIS are both running. Web Enrollment may be active; block was not applied.'
+        }
+        Set-NativeFirewallBlockRule -RuleName 'CCDC-AD-Block-HTTP'  -Protocol TCP -Port @('80')
+        Set-NativeFirewallBlockRule -RuleName 'CCDC-AD-Block-HTTPS' -Protocol TCP -Port @('443')
+    } | Out-Null
+
     Invoke-Step 'Enable Windows Firewall on all profiles after preparing AD allow rules' {
         if (!$tcpReady -or !$udpReady -or !$scoredRulesReady -or !$icmpReady) {
             throw 'Required AD, scoring, or ICMP allow rules were skipped or failed. Firewall activation was not changed; review existing rules manually.'
