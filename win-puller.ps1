@@ -1,20 +1,26 @@
 <#
 .SYNOPSIS
-    CCDC Windows Puller - Downloads Windows scripts and tools from the JMU-CDC public repository.
+    CCDC Windows Puller - Downloads Windows scripts, tools, and hardening plans from the JMU-CDC public repository.
 
 .DESCRIPTION
-    Pulls scripts and binaries from:
+    Pulls scripts, binaries, and hardening plans from:
     https://raw.githubusercontent.com/JMU-CDC/CCDC-Pub/refs/heads/main/
 
 .EXAMPLE
     .\win-puller.ps1
-    Interactive menu mode to select one or multiple items, all scripts, or all tools.
+    Interactive menu mode to select individual items, multiple items, or presets.
 
 .EXAMPLE
-    .\win-puller.ps1 -Selection "1,3,5" -Destination "C:\Tools"
+    .\win-puller.ps1 -Selection "1,4,8" -Destination "C:\Tools"
+
+.EXAMPLE
+    .\win-puller.ps1 -Plans -Destination "C:\CCDC"
 
 .EXAMPLE
     .\win-puller.ps1 -Scripts -Destination "C:\Tools\Scripts"
+
+.EXAMPLE
+    .\win-puller.ps1 -Tools -Destination "C:\Tools" -Unzip
 
 .EXAMPLE
     .\win-puller.ps1 -All -Destination "C:\Tools"
@@ -28,35 +34,64 @@ param(
     [Parameter(Position = 1)]
     [string]$Destination = ".\CCDC-Windows",
 
-    [switch]$All,
+    [switch]$Plans,
     [switch]$Scripts,
     [switch]$Tools,
-    [switch]$Unzip
+    [switch]$Logging,
+    [switch]$All,
+    [switch]$Unzip,
+    [switch]$Flat
 )
 
-# Enable TLS 1.2 for older PowerShell / Windows versions
+# Enable TLS 1.2 for older PowerShell / Windows versions (PS 5.1 / Server 2016)
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {
-    # Ignore if not supported
+    # Ignore if unsupported
 }
 
-# Repository configuration
+# Repository base URL (raw)
 $RepoBase = "https://raw.githubusercontent.com/JMU-CDC/CCDC-Pub/refs/heads/main"
 
-# Catalog of Windows Scripts and Tools
+# Catalog of Windows Plans, Scripts, Tools, and Logging packages
 $Manifest = @(
-    # --- Windows Scripts ---
+    # --- 5-Minute Hardening Plans ---
     [PSCustomObject]@{
         Id          = 1
-        Category    = "Scripts"
-        Name        = "Find-LinksAndAliases.ps1"
-        RelativeUri = "Windows/Scripts/Find-LinksAndAliases.ps1"
-        Size        = "15 KB"
-        Description = "Audit junctions, symlinks, and aliases"
+        Category    = "Plans"
+        Name        = "5_DC.ps1"
+        RelativeUri = "five_min_plans/5_DC.ps1"
+        Size        = "114 KB"
+        Description = "Active Directory Domain Controller Hardening Plan"
     },
     [PSCustomObject]@{
         Id          = 2
+        Category    = "Plans"
+        Name        = "5_win_wks.ps1"
+        RelativeUri = "five_min_plans/5_win_wks.ps1"
+        Size        = "25 KB"
+        Description = "Windows Workstation Hardening Plan"
+    },
+    [PSCustomObject]@{
+        Id          = 3
+        Category    = "Plans"
+        Name        = "5_MSSQL.ps1"
+        RelativeUri = "five_min_plans/5_MSSQL.ps1"
+        Size        = "18 KB"
+        Description = "MSSQL Server Hardening Plan"
+    },
+
+    # --- Windows Scripts ---
+    [PSCustomObject]@{
+        Id          = 4
+        Category    = "Scripts"
+        Name        = "Find-LinksAndAliases.ps1"
+        RelativeUri = "Windows/Scripts/Find-LinksAndAliases.ps1"
+        Size        = "16 KB"
+        Description = "Audit junctions, symlinks, and aliases"
+    },
+    [PSCustomObject]@{
+        Id          = 5
         Category    = "Scripts"
         Name        = "PrivescCheck.ps1"
         RelativeUri = "Windows/Scripts/PrivescCheck.ps1"
@@ -64,7 +99,7 @@ $Manifest = @(
         Description = "Windows privilege escalation enumeration"
     },
     [PSCustomObject]@{
-        Id          = 3
+        Id          = 6
         Category    = "Scripts"
         Name        = "Setup-Sysmon.ps1"
         RelativeUri = "Windows/Scripts/Setup-Sysmon.ps1"
@@ -72,7 +107,7 @@ $Manifest = @(
         Description = "Automated Sysmon installer / updater"
     },
     [PSCustomObject]@{
-        Id          = 4
+        Id          = 7
         Category    = "Scripts"
         Name        = "sysmonconfig.xml"
         RelativeUri = "Windows/Scripts/sysmonconfig.xml"
@@ -82,7 +117,7 @@ $Manifest = @(
 
     # --- Windows Tools ---
     [PSCustomObject]@{
-        Id          = 5
+        Id          = 8
         Category    = "Tools"
         Name        = "BLUESPAWN-client-x64.zip"
         RelativeUri = "Windows/Tools/BLUESPAWN-client-x64.zip"
@@ -90,7 +125,7 @@ $Manifest = @(
         Description = "EDR & active defense tool"
     },
     [PSCustomObject]@{
-        Id          = 6
+        Id          = 9
         Category    = "Tools"
         Name        = "Firefox Setup 158.0.1.msi"
         RelativeUri = "Windows/Tools/Firefox Setup 158.0.1.msi"
@@ -98,7 +133,7 @@ $Manifest = @(
         Description = "Firefox browser installer"
     },
     [PSCustomObject]@{
-        Id          = 7
+        Id          = 10
         Category    = "Tools"
         Name        = "floss.exe"
         RelativeUri = "Windows/Tools/floss.exe"
@@ -106,7 +141,7 @@ $Manifest = @(
         Description = "FLARE Obfuscated String Solver"
     },
     [PSCustomObject]@{
-        Id          = 8
+        Id          = 11
         Category    = "Tools"
         Name        = "optisys_x64.zip"
         RelativeUri = "Windows/Tools/optisys_x64.zip"
@@ -114,7 +149,7 @@ $Manifest = @(
         Description = "Process and system inspection utility"
     },
     [PSCustomObject]@{
-        Id          = 9
+        Id          = 12
         Category    = "Tools"
         Name        = "systeminformer.zip"
         RelativeUri = "Windows/Tools/systeminformer.zip"
@@ -122,20 +157,30 @@ $Manifest = @(
         Description = "Process Hacker / System Informer"
     },
     [PSCustomObject]@{
-        Id          = 10
-        Category    = "Tools"
-        Name        = "thor-lite-windows_10.7.32.zip"
-        RelativeUri = "Windows/Tools/thor-lite-windows_10.7.32.zip"
-        Size        = "43.7 MB"
-        Description = "THOR Lite compromise / APT scanner"
-    },
-    [PSCustomObject]@{
-        Id          = 11
+        Id          = 13
         Category    = "Tools"
         Name        = "Wireshark-4.6.8-x64.exe"
         RelativeUri = "Windows/Tools/Wireshark-4.6.8-x64.exe"
         Size        = "98.9 MB"
         Description = "Wireshark network packet analyzer"
+    },
+
+    # --- Windows Logging Packages ---
+    [PSCustomObject]@{
+        Id          = 14
+        Category    = "Logging"
+        Name        = "InstallClientWindows.zip"
+        RelativeUri = "Logging/Scripts/InstallClientWindows.zip"
+        Size        = "28.3 MB"
+        Description = "Velociraptor/Logging Windows Client installer"
+    },
+    [PSCustomObject]@{
+        Id          = 15
+        Category    = "Logging"
+        Name        = "InstallServerWindows.zip"
+        RelativeUri = "Logging/Scripts/InstallServerWindows.zip"
+        Size        = "28.3 MB"
+        Description = "Velociraptor/Logging Windows Server installer"
     }
 )
 
@@ -146,12 +191,21 @@ function Show-Menu {
     Write-Host "  Repo: JMU-CDC/CCDC-Pub (refs/heads/main)                       " -ForegroundColor DarkGray
     Write-Host "=================================================================" -ForegroundColor Cyan
 
+    Write-Host "`n[ 5-Minute Hardening Plans ]" -ForegroundColor Magenta
+    foreach ($item in ($Manifest | Where-Object { $_.Category -eq "Plans" })) {
+        $idStr = "[{0,2}]" -f $item.Id
+        Write-Host "  $idStr " -ForegroundColor Cyan -NoNewline
+        Write-Host ("{0,-28}" -f $item.Name) -ForegroundColor White -NoNewline
+        Write-Host ("({0,7})  " -f $item.Size) -ForegroundColor DarkGray -NoNewline
+        Write-Host $item.Description -ForegroundColor Gray
+    }
+
     Write-Host "`n[ Windows Scripts ]" -ForegroundColor Green
     foreach ($item in ($Manifest | Where-Object { $_.Category -eq "Scripts" })) {
         $idStr = "[{0,2}]" -f $item.Id
         Write-Host "  $idStr " -ForegroundColor Cyan -NoNewline
         Write-Host ("{0,-28}" -f $item.Name) -ForegroundColor White -NoNewline
-        Write-Host ("({0,6})  " -f $item.Size) -ForegroundColor DarkGray -NoNewline
+        Write-Host ("({0,7})  " -f $item.Size) -ForegroundColor DarkGray -NoNewline
         Write-Host $item.Description -ForegroundColor Gray
     }
 
@@ -159,18 +213,31 @@ function Show-Menu {
     foreach ($item in ($Manifest | Where-Object { $_.Category -eq "Tools" })) {
         $idStr = "[{0,2}]" -f $item.Id
         Write-Host "  $idStr " -ForegroundColor Cyan -NoNewline
-        Write-Host ("{0,-32}" -f $item.Name) -ForegroundColor White -NoNewline
+        Write-Host ("{0,-28}" -f $item.Name) -ForegroundColor White -NoNewline
+        Write-Host ("({0,7})  " -f $item.Size) -ForegroundColor DarkGray -NoNewline
+        Write-Host $item.Description -ForegroundColor Gray
+    }
+
+    Write-Host "`n[ Windows Logging Packages ]" -ForegroundColor Blue
+    foreach ($item in ($Manifest | Where-Object { $_.Category -eq "Logging" })) {
+        $idStr = "[{0,2}]" -f $item.Id
+        Write-Host "  $idStr " -ForegroundColor Cyan -NoNewline
+        Write-Host ("{0,-28}" -f $item.Name) -ForegroundColor White -NoNewline
         Write-Host ("({0,7})  " -f $item.Size) -ForegroundColor DarkGray -NoNewline
         Write-Host $item.Description -ForegroundColor Gray
     }
 
     Write-Host "`n[ Quick Presets ]" -ForegroundColor Magenta
-    Write-Host "  [ A] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL items (Scripts + Tools)" -ForegroundColor White
+    Write-Host "  [ P] " -ForegroundColor Cyan -NoNewline
+    Write-Host "Download ALL 5-Minute Plans (1-3)" -ForegroundColor White
     Write-Host "  [ S] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Scripts (1-4)" -ForegroundColor White
+    Write-Host "Download ALL Scripts (4-7)" -ForegroundColor White
     Write-Host "  [ T] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Tools (5-11)" -ForegroundColor White
+    Write-Host "Download ALL Tools (8-13)" -ForegroundColor White
+    Write-Host "  [ L] " -ForegroundColor Cyan -NoNewline
+    Write-Host "Download ALL Logging Packages (14-15)" -ForegroundColor White
+    Write-Host "  [ A] " -ForegroundColor Cyan -NoNewline
+    Write-Host "Download ALL Items (1-15)" -ForegroundColor White
     Write-Host "  [ Q] " -ForegroundColor Cyan -NoNewline
     Write-Host "Quit" -ForegroundColor White
     Write-Host "-----------------------------------------------------------------" -ForegroundColor Cyan
@@ -218,9 +285,9 @@ function Download-FileWithProgress {
 }
 
 # Determine selection if running interactively
-if (-not $All -and -not $Scripts -and -not $Tools -and [string]::IsNullOrWhiteSpace($Selection)) {
+if (-not $All -and -not $Plans -and -not $Scripts -and -not $Tools -and -not $Logging -and [string]::IsNullOrWhiteSpace($Selection)) {
     Show-Menu
-    $rawChoice = Read-Host "`nEnter selection (e.g. 1,3,5 or 1-4,10 or A/S/T/Q)"
+    $rawChoice = Read-Host "`nEnter selection (e.g. 1,4,8 or 1-3,8 or P/S/T/L/A/Q)"
     if ([string]::IsNullOrWhiteSpace($rawChoice) -or $rawChoice.Trim().ToUpper() -eq 'Q') {
         Write-Host "Exiting. No files downloaded." -ForegroundColor Yellow
         return
@@ -238,10 +305,14 @@ $selectedItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 if ($All -or ($Selection -match '^(?i)A(LL)?$')) {
     $selectedItems.AddRange($Manifest)
+} elseif ($Plans -or ($Selection -match '^(?i)P(LANS)?$')) {
+    $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Plans" }))
 } elseif ($Scripts -or ($Selection -match '^(?i)S(CRIPTS)?$')) {
     $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Scripts" }))
 } elseif ($Tools -or ($Selection -match '^(?i)T(OOLS)?$')) {
     $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Tools" }))
+} elseif ($Logging -or ($Selection -match '^(?i)L(OGGING)?$')) {
+    $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Logging" }))
 } else {
     # Parse numbers, comma-separated lists, and ranges (e.g., "1, 3, 5", "1-4, 8", "1 2 5")
     $tokens = $Selection -split '[, ]+' | Where-Object { $_ -ne '' }
@@ -257,10 +328,14 @@ if ($All -or ($Selection -match '^(?i)A(LL)?$')) {
             }
         } elseif ($tok -match '^\d+$') {
             [void]$resolvedIds.Add([int]$tok)
+        } elseif ($tok.ToUpper() -eq 'P') {
+            foreach ($p in ($Manifest | Where-Object { $_.Category -eq "Plans" })) { [void]$resolvedIds.Add($p.Id) }
         } elseif ($tok.ToUpper() -eq 'S') {
             foreach ($s in ($Manifest | Where-Object { $_.Category -eq "Scripts" })) { [void]$resolvedIds.Add($s.Id) }
         } elseif ($tok.ToUpper() -eq 'T') {
             foreach ($t in ($Manifest | Where-Object { $_.Category -eq "Tools" })) { [void]$resolvedIds.Add($t.Id) }
+        } elseif ($tok.ToUpper() -eq 'L') {
+            foreach ($l in ($Manifest | Where-Object { $_.Category -eq "Logging" })) { [void]$resolvedIds.Add($l.Id) }
         } elseif ($tok.ToUpper() -eq 'A') {
             foreach ($a in $Manifest) { [void]$resolvedIds.Add($a.Id) }
         } else {
@@ -297,9 +372,15 @@ $successCount = 0
 $failCount = 0
 
 foreach ($item in $selectedItems) {
-    $rawUrl = "$RepoBase/$($item.RelativeUri)"
-    # Place scripts in Scripts/ and tools in Tools/ under destination, or flat
-    $targetPath = Join-Path $resolvedDest (Join-Path $item.Category $item.Name)
+    # Properly encode URI segments for spaces (e.g. Firefox Setup 158.0.1.msi)
+    $encodedUri = ($item.RelativeUri.Split('/') | ForEach-Object { [System.Uri]::EscapeDataString($_) }) -join '/'
+    $rawUrl = "$RepoBase/$encodedUri"
+
+    if ($Flat) {
+        $targetPath = Join-Path $resolvedDest $item.Name
+    } else {
+        $targetPath = Join-Path $resolvedDest (Join-Path $item.Category $item.Name)
+    }
 
     $ok = Download-FileWithProgress -Url $rawUrl -OutFile $targetPath -DisplayName "$($item.Category)/$($item.Name)" -SizeInfo $item.Size
     if ($ok) {
@@ -322,4 +403,3 @@ foreach ($item in $selectedItems) {
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "Download Complete: $successCount succeeded, $failCount failed." -ForegroundColor $(if ($failCount -eq 0) { "Green" } else { "Yellow" })
 Write-Host "Files saved to: $resolvedDest`n" -ForegroundColor Cyan
-
