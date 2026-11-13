@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    CCDC Windows Puller - Downloads Windows scripts, tools, and hardening plans from the JMU-CDC public repository.
+    CCDC Windows Puller - Downloads Windows scripts, tools, GPOs, and hardening plans from the JMU-CDC public repository.
 
 .DESCRIPTION
     Pulls scripts, binaries, and hardening plans from:
@@ -11,13 +11,13 @@
     Interactive menu mode to select individual items, multiple items, or presets.
 
 .EXAMPLE
-    .\win-puller.ps1 -Selection "1,4,7,8" -Destination "C:\Tools"
+    .\win-puller.ps1 -Selection "1,5-10" -Destination "C:\CCDC"
+
+.EXAMPLE
+    .\win-puller.ps1 -GPO -Destination "C:\CCDC\GPO"
 
 .EXAMPLE
     .\win-puller.ps1 -Plans -Destination "C:\CCDC"
-
-.EXAMPLE
-    .\win-puller.ps1 -Scripts -Destination "C:\Tools\Scripts"
 
 .EXAMPLE
     .\win-puller.ps1 -Tools -Destination "C:\Tools" -Unzip
@@ -35,6 +35,7 @@ param(
     [string]$Destination = ".\CCDC-Windows",
 
     [switch]$Plans,
+    [switch]$GPO,
     [switch]$Scripts,
     [switch]$Tools,
     [switch]$Logging,
@@ -53,7 +54,7 @@ try {
 # Repository base URL (raw)
 $RepoBase = "https://raw.githubusercontent.com/JMU-CDC/CCDC-Pub/refs/heads/main"
 
-# Catalog of Windows Plans, Scripts, Tools, and Logging packages
+# Catalog of Windows Plans, GPOs, Scripts, Tools, and Logging packages
 $Manifest = @(
     # --- 5-Minute Hardening Plans ---
     [PSCustomObject]@{
@@ -80,10 +81,68 @@ $Manifest = @(
         Size        = "18 KB"
         Description = "MSSQL Server Hardening Plan"
     },
+    [PSCustomObject]@{
+        Id          = 4
+        Category    = "Plans"
+        Name        = "5_paloalto_api.ps1"
+        RelativeUri = "five_min_plans/5_paloalto_api.ps1"
+        Size        = "21 KB"
+        Description = "Palo Alto XML API Hardener (Run from Windows 7+)"
+    },
+
+    # --- Windows GPO Scripts ---
+    [PSCustomObject]@{
+        Id          = 5
+        Category    = "GPO"
+        Name        = "GPO-ASR.ps1"
+        RelativeUri = "Windows/GPO/GPO-ASR.ps1"
+        Size        = "4.4 KB"
+        Description = "Deploy Defender Attack Surface Reduction (ASR) rules"
+    },
+    [PSCustomObject]@{
+        Id          = 6
+        Category    = "GPO"
+        Name        = "GPO-Baseline.ps1"
+        RelativeUri = "Windows/GPO/GPO-Baseline.ps1"
+        Size        = "11.8 KB"
+        Description = "Active Directory domain baseline hardening GPO"
+    },
+    [PSCustomObject]@{
+        Id          = 7
+        Category    = "GPO"
+        Name        = "GPO-EventLogs.ps1"
+        RelativeUri = "Windows/GPO/GPO-EventLogs.ps1"
+        Size        = "4.3 KB"
+        Description = "Configure event log retention and size GPO"
+    },
+    [PSCustomObject]@{
+        Id          = 8
+        Category    = "GPO"
+        Name        = "GPO-Firewall.ps1"
+        RelativeUri = "Windows/GPO/GPO-Firewall.ps1"
+        Size        = "7.2 KB"
+        Description = "Enforce domain firewall baseline and scoring ports GPO"
+    },
+    [PSCustomObject]@{
+        Id          = 9
+        Category    = "GPO"
+        Name        = "GPO-LogonBanner.ps1"
+        RelativeUri = "Windows/GPO/GPO-LogonBanner.ps1"
+        Size        = "5.0 KB"
+        Description = "Deploy interactive logon warning banner GPO"
+    },
+    [PSCustomObject]@{
+        Id          = 10
+        Category    = "GPO"
+        Name        = "GPO-RestrictedGroups.ps1"
+        RelativeUri = "Windows/GPO/GPO-RestrictedGroups.ps1"
+        Size        = "4.6 KB"
+        Description = "Restrict local Administrator group membership GPO"
+    },
 
     # --- Windows Scripts ---
     [PSCustomObject]@{
-        Id          = 4
+        Id          = 11
         Category    = "Scripts"
         Name        = "Find-LateralMovement.ps1"
         RelativeUri = "Windows/Scripts/Find-LateralMovement.ps1"
@@ -91,7 +150,7 @@ $Manifest = @(
         Description = "Triage logs/EVTX for lateral movement leads"
     },
     [PSCustomObject]@{
-        Id          = 5
+        Id          = 12
         Category    = "Scripts"
         Name        = "Find-LinksAndAliases.ps1"
         RelativeUri = "Windows/Scripts/Find-LinksAndAliases.ps1"
@@ -99,7 +158,7 @@ $Manifest = @(
         Description = "Audit junctions, symlinks, and aliases"
     },
     [PSCustomObject]@{
-        Id          = 6
+        Id          = 13
         Category    = "Scripts"
         Name        = "PrivescCheck.ps1"
         RelativeUri = "Windows/Scripts/PrivescCheck.ps1"
@@ -107,7 +166,7 @@ $Manifest = @(
         Description = "Windows privilege escalation enumeration"
     },
     [PSCustomObject]@{
-        Id          = 7
+        Id          = 14
         Category    = "Scripts"
         Name        = "Set-ADGPO.ps1"
         RelativeUri = "Windows/Scripts/Set-ADGPO.ps1"
@@ -115,7 +174,7 @@ $Manifest = @(
         Description = "Create and link hardening GPO in Active Directory"
     },
     [PSCustomObject]@{
-        Id          = 8
+        Id          = 15
         Category    = "Scripts"
         Name        = "Set-LogonBanner.ps1"
         RelativeUri = "Windows/Scripts/Set-LogonBanner.ps1"
@@ -123,7 +182,7 @@ $Manifest = @(
         Description = "Configure interactive logon warning locally or via GPO"
     },
     [PSCustomObject]@{
-        Id          = 9
+        Id          = 16
         Category    = "Scripts"
         Name        = "Setup-Sysmon.ps1"
         RelativeUri = "Windows/Scripts/Setup-Sysmon.ps1"
@@ -131,7 +190,7 @@ $Manifest = @(
         Description = "Automated Sysmon installer / updater"
     },
     [PSCustomObject]@{
-        Id          = 10
+        Id          = 17
         Category    = "Scripts"
         Name        = "sysmonconfig.xml"
         RelativeUri = "Windows/Scripts/sysmonconfig.xml"
@@ -141,7 +200,7 @@ $Manifest = @(
 
     # --- Windows Tools ---
     [PSCustomObject]@{
-        Id          = 11
+        Id          = 18
         Category    = "Tools"
         Name        = "BLUESPAWN-client-x64.zip"
         RelativeUri = "Windows/Tools/BLUESPAWN-client-x64.zip"
@@ -149,7 +208,7 @@ $Manifest = @(
         Description = "EDR & active defense tool"
     },
     [PSCustomObject]@{
-        Id          = 12
+        Id          = 19
         Category    = "Tools"
         Name        = "Firefox Setup 158.0.1.msi"
         RelativeUri = "Windows/Tools/Firefox Setup 158.0.1.msi"
@@ -157,7 +216,7 @@ $Manifest = @(
         Description = "Firefox browser installer"
     },
     [PSCustomObject]@{
-        Id          = 13
+        Id          = 20
         Category    = "Tools"
         Name        = "floss.exe"
         RelativeUri = "Windows/Tools/floss.exe"
@@ -165,7 +224,7 @@ $Manifest = @(
         Description = "FLARE Obfuscated String Solver"
     },
     [PSCustomObject]@{
-        Id          = 14
+        Id          = 21
         Category    = "Tools"
         Name        = "optisys_x64.zip"
         RelativeUri = "Windows/Tools/optisys_x64.zip"
@@ -173,7 +232,7 @@ $Manifest = @(
         Description = "Process and system inspection utility"
     },
     [PSCustomObject]@{
-        Id          = 15
+        Id          = 22
         Category    = "Tools"
         Name        = "systeminformer.zip"
         RelativeUri = "Windows/Tools/systeminformer.zip"
@@ -181,7 +240,7 @@ $Manifest = @(
         Description = "Process Hacker / System Informer"
     },
     [PSCustomObject]@{
-        Id          = 16
+        Id          = 23
         Category    = "Tools"
         Name        = "Wireshark-4.6.8-x64.exe"
         RelativeUri = "Windows/Tools/Wireshark-4.6.8-x64.exe"
@@ -191,7 +250,7 @@ $Manifest = @(
 
     # --- Windows Logging Packages ---
     [PSCustomObject]@{
-        Id          = 17
+        Id          = 24
         Category    = "Logging"
         Name        = "InstallClientWindows.zip"
         RelativeUri = "Logging/Scripts/InstallClientWindows.zip"
@@ -199,7 +258,7 @@ $Manifest = @(
         Description = "Velociraptor/Logging Windows Client installer"
     },
     [PSCustomObject]@{
-        Id          = 18
+        Id          = 25
         Category    = "Logging"
         Name        = "InstallServerWindows.zip"
         RelativeUri = "Logging/Scripts/InstallServerWindows.zip"
@@ -217,6 +276,15 @@ function Show-Menu {
 
     Write-Host "`n[ 5-Minute Hardening Plans ]" -ForegroundColor Magenta
     foreach ($item in ($Manifest | Where-Object { $_.Category -eq "Plans" })) {
+        $idStr = "[{0,2}]" -f $item.Id
+        Write-Host "  $idStr " -ForegroundColor Cyan -NoNewline
+        Write-Host ("{0,-28}" -f $item.Name) -ForegroundColor White -NoNewline
+        Write-Host ("({0,7})  " -f $item.Size) -ForegroundColor DarkGray -NoNewline
+        Write-Host $item.Description -ForegroundColor Gray
+    }
+
+    Write-Host "`n[ Active Directory GPO Hardening Scripts ]" -ForegroundColor Yellow
+    foreach ($item in ($Manifest | Where-Object { $_.Category -eq "GPO" })) {
         $idStr = "[{0,2}]" -f $item.Id
         Write-Host "  $idStr " -ForegroundColor Cyan -NoNewline
         Write-Host ("{0,-28}" -f $item.Name) -ForegroundColor White -NoNewline
@@ -253,15 +321,17 @@ function Show-Menu {
 
     Write-Host "`n[ Quick Presets ]" -ForegroundColor Magenta
     Write-Host "  [ P] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL 5-Minute Plans (1-3)" -ForegroundColor White
+    Write-Host "Download ALL 5-Minute Plans (1-4)" -ForegroundColor White
+    Write-Host "  [ G] " -ForegroundColor Cyan -NoNewline
+    Write-Host "Download ALL GPO Scripts (5-10)" -ForegroundColor White
     Write-Host "  [ S] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Scripts (4-10)" -ForegroundColor White
+    Write-Host "Download ALL Scripts (11-17)" -ForegroundColor White
     Write-Host "  [ T] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Tools (11-16)" -ForegroundColor White
+    Write-Host "Download ALL Tools (18-23)" -ForegroundColor White
     Write-Host "  [ L] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Logging Packages (17-18)" -ForegroundColor White
+    Write-Host "Download ALL Logging Packages (24-25)" -ForegroundColor White
     Write-Host "  [ A] " -ForegroundColor Cyan -NoNewline
-    Write-Host "Download ALL Items (1-18)" -ForegroundColor White
+    Write-Host "Download ALL Items (1-25)" -ForegroundColor White
     Write-Host "  [ Q] " -ForegroundColor Cyan -NoNewline
     Write-Host "Quit" -ForegroundColor White
     Write-Host "-----------------------------------------------------------------" -ForegroundColor Cyan
@@ -309,9 +379,9 @@ function Download-FileWithProgress {
 }
 
 # Determine selection if running interactively
-if (-not $All -and -not $Plans -and -not $Scripts -and -not $Tools -and -not $Logging -and [string]::IsNullOrWhiteSpace($Selection)) {
+if (-not $All -and -not $Plans -and -not $GPO -and -not $Scripts -and -not $Tools -and -not $Logging -and [string]::IsNullOrWhiteSpace($Selection)) {
     Show-Menu
-    $rawChoice = Read-Host "`nEnter selection (e.g. 1,4,7 or 1-3,8 or P/S/T/L/A/Q)"
+    $rawChoice = Read-Host "`nEnter selection (e.g. 1,5,11 or 5-10 or P/G/S/T/L/A/Q)"
     if ([string]::IsNullOrWhiteSpace($rawChoice) -or $rawChoice.Trim().ToUpper() -eq 'Q') {
         Write-Host "Exiting. No files downloaded." -ForegroundColor Yellow
         return
@@ -325,20 +395,22 @@ if (-not $All -and -not $Plans -and -not $Scripts -and -not $Tools -and -not $Lo
 }
 
 # Parse selected items
-$selectedItems = [System.Collections.Generic.List[PSCustomObject]]::new()
+$selectedItems = New-Object System.Collections.ArrayList
 
 if ($All -or ($Selection -match '^(?i)A(LL)?$')) {
-    $selectedItems.AddRange($Manifest)
+    $Manifest | ForEach-Object { [void]$selectedItems.Add($_) }
 } elseif ($Plans -or ($Selection -match '^(?i)P(LANS)?$')) {
-    $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Plans" }))
+    $Manifest | Where-Object { $_.Category -eq "Plans" } | ForEach-Object { [void]$selectedItems.Add($_) }
+} elseif ($GPO -or ($Selection -match '^(?i)G(PO)?$')) {
+    $Manifest | Where-Object { $_.Category -eq "GPO" } | ForEach-Object { [void]$selectedItems.Add($_) }
 } elseif ($Scripts -or ($Selection -match '^(?i)S(CRIPTS)?$')) {
-    $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Scripts" }))
+    $Manifest | Where-Object { $_.Category -eq "Scripts" } | ForEach-Object { [void]$selectedItems.Add($_) }
 } elseif ($Tools -or ($Selection -match '^(?i)T(OOLS)?$')) {
-    $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Tools" }))
+    $Manifest | Where-Object { $_.Category -eq "Tools" } | ForEach-Object { [void]$selectedItems.Add($_) }
 } elseif ($Logging -or ($Selection -match '^(?i)L(OGGING)?$')) {
-    $selectedItems.AddRange(($Manifest | Where-Object { $_.Category -eq "Logging" }))
+    $Manifest | Where-Object { $_.Category -eq "Logging" } | ForEach-Object { [void]$selectedItems.Add($_) }
 } else {
-    # Parse numbers, comma-separated lists, and ranges (e.g., "1, 3, 5", "1-4, 8", "1 2 5")
+    # Parse numbers, comma-separated lists, and ranges (e.g., "1, 3, 5", "5-10, 18", "1 2 5")
     $tokens = $Selection -split '[, ]+' | Where-Object { $_ -ne '' }
     $resolvedIds = [System.Collections.Generic.HashSet[int]]::new()
 
@@ -354,6 +426,8 @@ if ($All -or ($Selection -match '^(?i)A(LL)?$')) {
             [void]$resolvedIds.Add([int]$tok)
         } elseif ($tok.ToUpper() -eq 'P') {
             foreach ($p in ($Manifest | Where-Object { $_.Category -eq "Plans" })) { [void]$resolvedIds.Add($p.Id) }
+        } elseif ($tok.ToUpper() -eq 'G') {
+            foreach ($g in ($Manifest | Where-Object { $_.Category -eq "GPO" })) { [void]$resolvedIds.Add($g.Id) }
         } elseif ($tok.ToUpper() -eq 'S') {
             foreach ($s in ($Manifest | Where-Object { $_.Category -eq "Scripts" })) { [void]$resolvedIds.Add($s.Id) }
         } elseif ($tok.ToUpper() -eq 'T') {
@@ -370,7 +444,7 @@ if ($All -or ($Selection -match '^(?i)A(LL)?$')) {
     foreach ($id in $resolvedIds) {
         $found = $Manifest | Where-Object { $_.Id -eq $id }
         if ($found) {
-            $selectedItems.Add($found)
+            [void]$selectedItems.Add($found)
         } else {
             Write-Warning "Item ID [$id] not found in manifest."
         }
