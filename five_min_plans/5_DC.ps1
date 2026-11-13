@@ -1059,10 +1059,19 @@ function Get-ServiceBaseline {
     $hints = @{21='FTP';22='SSH';25='SMTP';53='DNS';80='HTTP';110='POP3';123='NTP';143='IMAP';389='LDAP';443='HTTPS';445='SMB';636='LDAPS';1433='SQL';3389='RDP';5985='WinRM HTTP';5986='WinRM HTTPS';8000='Possible Splunk web';8089='Possible Splunk management';9997='Possible Splunk receiver'}
     foreach ($protocol in 'TCP','UDP') {
         try {
+            $dnsPid = (Get-Process dns -ErrorAction SilentlyContinue).Id
             $items = if ($protocol -eq 'TCP') {
-                @(Invoke-DiscoveryQuery 'TCP listeners' { Get-NetTCPConnection -State Listen -ErrorAction Stop })
+                @(Invoke-DiscoveryQuery 'TCP listeners' {
+                    $dId = (Get-Process dns -ErrorAction SilentlyContinue).Id
+                    Get-NetTCPConnection -State Listen -ErrorAction Stop |
+                        Where-Object { $null -eq $dId -or $_.OwningProcess -ne $dId }
+                })
             } else {
-                @(Invoke-DiscoveryQuery 'UDP endpoints' { Get-NetUDPEndpoint -ErrorAction Stop })
+                @(Invoke-DiscoveryQuery 'UDP endpoints' {
+                    $dId = (Get-Process dns -ErrorAction SilentlyContinue).Id
+                    Get-NetUDPEndpoint -ErrorAction Stop |
+                        Where-Object { $null -eq $dId -or $_.OwningProcess -ne $dId }
+                })
             }
             foreach ($item in $items) {
                 $processId = [int]$item.OwningProcess
@@ -1366,20 +1375,23 @@ $adServer = $env:COMPUTERNAME
 $domain = Get-ADDomain -Server $adServer
 $administrator = Get-ADUser -Identity "$($domain.DomainSID.Value)-500" -Server $adServer
 $report = Join-Path $ReportRoot (Get-Date -Format 'yyyyMMdd-HHmmss-fff')
-Write-Host 'Guided AD plan: Enter runs one action; n skips it; Ctrl+C stops the walkthrough.' -ForegroundColor Cyan
-Write-Host 'Discover and back up services before hardening. Configuration exports are not a server image; AD recovery needs system state. Use -SystemStateBackupTarget for an optional system-state backup.'
-Write-Host "Domain: $($domain.DNSRoot). Main administrator: $($administrator.SamAccountName)."
+Write-Host "Domain: $($domain.DNSRoot) | Main administrator: $($administrator.SamAccountName)" -ForegroundColor Green
 
 Write-Host "`n0. Discover services, then back up before hardening" -ForegroundColor Cyan
 $script:InitialServiceInventory = $null
-Invoke-Step 'Discover installed services/listeners/sites BEFORE any password or hardening changes' {
+Write-Host '[*] Discovering installed services/listeners/sites BEFORE any password or hardening changes...' -ForegroundColor Cyan
+try {
     $script:InitialServiceInventory = Get-ServiceBaseline
     $script:InitialServiceInventory.Endpoints | Sort-Object Port,Protocol | Format-Table -Wrap -AutoSize | Out-Host
     $script:InitialServiceInventory.Features | Format-Table -AutoSize | Out-Host
     $script:InitialServiceInventory.Shares | Format-Table -AutoSize | Out-Host
     if ($script:InitialServiceInventory.IisSitesXml) { Write-Host $script:InitialServiceInventory.IisSitesXml }
     foreach ($issue in $script:InitialServiceInventory.Issues) { Write-Warning "$($issue.Source): $($issue.Error)" }
-} | Out-Null
+    $script:Results.Add([pscustomobject]@{ Step='Discover installed services/listeners/sites'; Status='Completed'; Error='' })
+} catch {
+    $script:Results.Add([pscustomobject]@{ Step='Discover installed services/listeners/sites'; Status='Failed'; Error=$_.Exception.Message })
+    Write-Warning "Discovery failed: $($_.Exception.Message)"
+}
 Invoke-Step 'Persist timestamped PowerShell and child CMD prompts for the current user across PowerShell restarts' {
     Install-TimestampPrompt
 } | Out-Null
@@ -1620,7 +1632,12 @@ if ($Mode -ne 'Audit') {
         Set-NativeFirewallProfiles -Setting Logging
     } | Out-Null
     Export-Evidence 'Connections' {
-        try { Get-NetTCPConnection -ErrorAction Stop | Select-Object State,LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess }
+        try {
+            $dnsPid = (Get-Process dns -ErrorAction SilentlyContinue).Id
+            Get-NetTCPConnection -ErrorAction Stop |
+                Where-Object { $null -eq $dnsPid -or $_.OwningProcess -ne $dnsPid } |
+                Select-Object State,LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess
+        }
         catch {
             Write-Warning "CIM connection query failed: $($_.Exception.Message) Exporting native netstat output instead."
             Invoke-Native "$env:SystemRoot\System32\netstat.exe" @('-ano')
@@ -1668,7 +1685,12 @@ Export-Evidence 'ServiceControlManagerSecurity' { Get-ScManagerSddl }
 Export-Evidence 'Accounts' { Get-ADUser -Filter * -Properties Enabled,LockedOut,MemberOf,PrimaryGroupID,LastLogonDate,Description,ServicePrincipalName,PasswordLastSet -Server $adServer }
 Export-Evidence 'PasswordPolicy' { Get-ADDefaultDomainPasswordPolicy -Server $adServer }
 Export-Evidence 'Services-After' { Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name,State,StartMode,StartName,PathName }
-Export-Evidence 'ListeningPorts' { Get-NetTCPConnection -State Listen -ErrorAction Stop | Select-Object LocalPort,OwningProcess | Sort-Object LocalPort }
+Export-Evidence 'ListeningPorts' {
+    $dnsPid = (Get-Process dns -ErrorAction SilentlyContinue).Id
+    Get-NetTCPConnection -State Listen -ErrorAction Stop |
+        Where-Object { $null -eq $dnsPid -or $_.OwningProcess -ne $dnsPid } |
+        Select-Object LocalPort,OwningProcess | Sort-Object LocalPort
+}
 Export-Evidence 'Processes' { Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine }
 Export-Evidence 'Tasks' { Get-ScheduledTask -ErrorAction Stop | Select-Object TaskPath,TaskName,State,Actions,Principal,Triggers }
 Export-Evidence 'StartupRegistry' {
