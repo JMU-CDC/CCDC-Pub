@@ -813,6 +813,31 @@ function Set-RegistryDword {
     } | Out-Null
 }
 
+function Set-RegistryDwordDirect {
+    param([string]$Description, [string]$Path, [string]$Name, [int]$Value,
+        [ValidateSet('Completed','PendingRestart')][string]$CompletionStatus='Completed')
+    $stepName = "$Description ($Name = $Value)"
+    $operation = 'check key'
+    try {
+        if (!(Test-Path -LiteralPath $Path -ErrorAction Stop)) {
+            $operation = 'create key'
+            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+        }
+        $operation = 'write DWORD value'
+        New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        $operation = 'verify DWORD value'
+        if ((Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop).$Name -ne $Value) {
+            throw 'Registry readback did not match.'
+        }
+        $script:Results.Add([pscustomobject]@{ Step=$stepName; Status=$CompletionStatus; Error='' })
+        Write-Host "[$CompletionStatus] $stepName"
+    } catch {
+        $errorMsg = "Registry operation '$operation' failed for '${Path}\${Name}': $($_.Exception.Message)"
+        $script:Results.Add([pscustomobject]@{ Step=$stepName; Status='Failed'; Error=$errorMsg })
+        Write-Warning "$stepName FAILED: $errorMsg"
+    }
+}
+
 function Start-FirewallServices {
     foreach ($serviceName in 'BFE','MpsSvc') {
         $service = Get-Service -Name $serviceName -ErrorAction Stop
@@ -971,12 +996,20 @@ function Set-NativeFirewallProfiles {
 }
 
 function Export-Evidence {
-    param([string]$Name, [scriptblock]$Query)
-    Invoke-Step "Review/export $Name" {
+    param([string]$Name, [scriptblock]$Query, [switch]$NoDisplay)
+    $stepName = if ($NoDisplay -or $Name -eq 'RecentEvents') { "Export $Name" } else { "Review/export $Name" }
+    try {
         $data = & $Query
-        $data | Out-Host
+        if (!$NoDisplay -and $Name -ne 'RecentEvents') {
+            $data | Out-Host
+        }
         if ($script:CanWriteReport) { $data | Export-Clixml -LiteralPath (Join-Path $report "$Name.xml") -Depth 6 }
-    } | Out-Null
+        $script:Results.Add([pscustomobject]@{ Step=$stepName; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepName"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepName; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepName FAILED: $($_.Exception.Message)"
+    }
 }
 
 function Invoke-BaselineNative {
@@ -1392,11 +1425,15 @@ try {
     $script:Results.Add([pscustomobject]@{ Step='Discover installed services/listeners/sites'; Status='Failed'; Error=$_.Exception.Message })
     Write-Warning "Discovery failed: $($_.Exception.Message)"
 }
-Invoke-Step 'Persist timestamped PowerShell and child CMD prompts for the current user across PowerShell restarts' {
+try {
     Install-TimestampPrompt
-} | Out-Null
+    $script:Results.Add([pscustomobject]@{ Step='Persist timestamped PowerShell and child CMD prompts for the current user across PowerShell restarts'; Status='Completed'; Error='' })
+} catch {
+    $script:Results.Add([pscustomobject]@{ Step='Persist timestamped PowerShell and child CMD prompts for the current user across PowerShell restarts'; Status='Failed'; Error=$_.Exception.Message })
+    Write-Warning "Failed to install timestamp prompt: $($_.Exception.Message)"
+}
 
-$script:CanWriteReport = Invoke-Step "Create protected report directory: $report" {
+try {
     New-Item -ItemType Directory -Path $report -Force | Out-Null
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
@@ -1407,6 +1444,13 @@ $script:CanWriteReport = Invoke-Step "Create protected report directory: $report
         $acl.AddAccessRule($rule)
     }
     Set-Acl -LiteralPath $report -AclObject $acl
+    $script:CanWriteReport = $true
+    $script:Results.Add([pscustomobject]@{ Step="Create protected report directory: $report"; Status='Completed'; Error='' })
+    Write-Host "[Completed] Create protected report directory: $report"
+} catch {
+    $script:CanWriteReport = $false
+    $script:Results.Add([pscustomobject]@{ Step="Create protected report directory: $report"; Status='Failed'; Error=$_.Exception.Message })
+    Write-Warning "Create protected report directory FAILED: $($_.Exception.Message)"
 }
 Invoke-Step 'Back up ALL discovered services BEFORE password or hardening changes (one approval runs all supported backups)' {
     if ($null -eq $script:InitialServiceInventory) { throw 'Service discovery was skipped or failed. Rerun discovery before attempting service backups.' }
@@ -1417,8 +1461,22 @@ Invoke-Step 'Back up ALL discovered services BEFORE password or hardening change
 } | Out-Null
 Export-Evidence 'Services-Before' { Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name, State, StartMode, StartName, PathName }
 if ($script:CanWriteReport) {
-    Invoke-Step 'Export original firewall policy' { Invoke-Native netsh.exe @('advfirewall','export',(Join-Path $report 'firewall-before.wfw')) } | Out-Null
-    Invoke-Step 'Export original audit policy' { Invoke-Native auditpol.exe @('/backup',"/file:$(Join-Path $report 'audit-before.csv')") } | Out-Null
+    try {
+        Invoke-Native netsh.exe @('advfirewall','export',(Join-Path $report 'firewall-before.wfw'))
+        $script:Results.Add([pscustomobject]@{ Step='Export original firewall policy'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Export original firewall policy'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Export original firewall policy'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Export original firewall policy FAILED: $($_.Exception.Message)"
+    }
+    try {
+        Invoke-Native auditpol.exe @('/backup',"/file:$(Join-Path $report 'audit-before.csv')")
+        $script:Results.Add([pscustomobject]@{ Step='Export original audit policy'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Export original audit policy'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Export original audit policy'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Export original audit policy FAILED: $($_.Exception.Message)"
+    }
 }
 
 if ($Mode -ne 'Audit') {
@@ -1440,15 +1498,39 @@ if ($Mode -ne 'Audit') {
     Invoke-Step 'Review every AD user: password, groups, enabled/disabled and locked/unlock status (each change is separately confirmed)' {
         Invoke-AccountReview -Scope AD
     } | Out-Null
-    Invoke-Step 'Disable the domain Guest account' {
+    try {
         $guest = "$($domain.DomainSID.Value)-501"
         Disable-ADAccount -Identity $guest -Server $adServer
         if ((Get-ADUser -Identity $guest -Server $adServer).Enabled) { throw 'Guest is still enabled.' }
-    } | Out-Null
-    Set-RegistryDword 'Restrict anonymous access' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'RestrictAnonymous' 1
-    Invoke-Step 'Set DOMAIN minimum password length to 12 characters' {
-        Set-ADDefaultDomainPasswordPolicy -Identity $domain.DistinguishedName -MinPasswordLength 12 -Server $adServer
-    } | Out-Null
+        $script:Results.Add([pscustomobject]@{ Step='Disable the domain Guest account'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Disable the domain Guest account'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Disable the domain Guest account'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Disable the domain Guest account FAILED: $($_.Exception.Message)"
+    }
+    try {
+        $lsaKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+        if (!(Test-Path -LiteralPath $lsaKey -ErrorAction Stop)) {
+            New-Item -Path $lsaKey -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -LiteralPath $lsaKey -Name 'RestrictAnonymous' -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        if ((Get-ItemProperty -LiteralPath $lsaKey -Name 'RestrictAnonymous' -ErrorAction Stop).RestrictAnonymous -ne 1) {
+            throw 'Registry readback did not match.'
+        }
+        $script:Results.Add([pscustomobject]@{ Step='Restrict anonymous access (RestrictAnonymous = 1)'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Restrict anonymous access (RestrictAnonymous = 1)'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Restrict anonymous access (RestrictAnonymous = 1)'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Restrict anonymous access (RestrictAnonymous = 1) FAILED: $($_.Exception.Message)"
+    }
+    try {
+        Set-ADDefaultDomainPasswordPolicy -Identity $domain.DistinguishedName -MinPasswordLength 12 -ComplexityEnabled $true -Server $adServer
+        $script:Results.Add([pscustomobject]@{ Step='Set DOMAIN minimum password length to 12 characters and enable complexity'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Set DOMAIN minimum password length to 12 characters and enable complexity'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Set DOMAIN minimum password length to 12 characters and enable complexity'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Set DOMAIN minimum password length to 12 characters and enable complexity FAILED: $($_.Exception.Message)"
+    }
     if ($null -ne $LockoutThreshold) {
         Invoke-Step "Set DOMAIN lockout threshold to $LockoutThreshold (0 disables lockout; nonzero uses 30-minute lockout/window; coordinate scoring)" {
             if ($LockoutThreshold -eq 0) {
@@ -1465,16 +1547,22 @@ if ($Mode -ne 'Audit') {
     Export-Evidence 'Sessions' { Invoke-Native query.exe @('session') }
 
     Write-Host "`n2. Features and services" -ForegroundColor Cyan
-    Invoke-Step 'Remove the current operator screensaver executable setting' {
+    try {
         if (Get-ItemProperty 'HKCU:\Control Panel\Desktop' -Name SCRNSAVE.EXE -ErrorAction SilentlyContinue) {
             Remove-ItemProperty 'HKCU:\Control Panel\Desktop' -Name SCRNSAVE.EXE
         }
-    } | Out-Null
+        $script:Results.Add([pscustomobject]@{ Step='Remove the current operator screensaver executable setting'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Remove the current operator screensaver executable setting'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Remove the current operator screensaver executable setting'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Remove the current operator screensaver executable setting FAILED: $($_.Exception.Message)"
+    }
     foreach ($stickyKeysTarget in @(
         @{ Name = 'current operator'; Path = 'HKCU:\Control Panel\Accessibility\StickyKeys' },
         @{ Name = 'sign-in screen (.DEFAULT)'; Path = 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Accessibility\StickyKeys' }
     )) {
-        Invoke-Step "Disable Sticky Keys and the five-Shift shortcut for $($stickyKeysTarget.Name) (saved setting; verify after next sign-in/restart)" {
+        $stepSticky = "Disable Sticky Keys and the five-Shift shortcut for $($stickyKeysTarget.Name) (saved setting; verify after next sign-in/restart)"
+        try {
             $key = $stickyKeysTarget.Path
             $exists = Test-Path -LiteralPath $key
             $previous = if ($exists) { (Get-ItemProperty -LiteralPath $key).Flags } else { $null }
@@ -1490,7 +1578,12 @@ if ($Mode -ne 'Audit') {
             }
             Write-Host "Sticky Keys Flags: '$previous' -> '$disabledFlags' at $key."
             Write-Host 'Saved for the next sign-in/restart; the active desktop may retain its cached setting. Verify five-Shift behavior afterward. Accessibility binaries and debugger redirects are not modified.'
-        } | Out-Null
+            $script:Results.Add([pscustomobject]@{ Step=$stepSticky; Status='Completed'; Error='' })
+            Write-Host "[Completed] $stepSticky"
+        } catch {
+            $script:Results.Add([pscustomobject]@{ Step=$stepSticky; Status='Failed'; Error=$_.Exception.Message })
+            Write-Warning "$stepSticky FAILED: $($_.Exception.Message)"
+        }
     }
     Invoke-Step 'Disable SMBv1 on the SMB server (native registry; restart required)' -CompletionStatus PendingRestart {
         Set-SmbRegistrySetting -Side Server -SettingName SMB1 -Value 0
@@ -1504,38 +1597,96 @@ if ($Mode -ne 'Audit') {
     Invoke-Step 'Restrict network-logon access to Service Control Manager (PsExec-style service creation; also blocks legitimate remote service management; requires protected backup directory)' {
         Protect-ScManagerNetworkAccess
     } | Out-Null
-    Set-RegistryDword 'Disable LLMNR' 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast' 0
-    $script:NetBiosAdapters = @()
-    $netBiosDiscoveryReady = Invoke-Step 'Discover IP-enabled adapters before changing NetBIOS (CIM failure skips NetBIOS changes)' {
-        $script:NetBiosAdapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop)
+    try {
+        $llmnrKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+        if (!(Test-Path -LiteralPath $llmnrKey -ErrorAction Stop)) {
+            New-Item -Path $llmnrKey -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -LiteralPath $llmnrKey -Name 'EnableMulticast' -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        if ((Get-ItemProperty -LiteralPath $llmnrKey -Name 'EnableMulticast' -ErrorAction Stop).EnableMulticast -ne 0) {
+            throw 'Registry readback did not match.'
+        }
+        $script:Results.Add([pscustomobject]@{ Step='Disable LLMNR (EnableMulticast = 0)'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Disable LLMNR (EnableMulticast = 0)'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Disable LLMNR (EnableMulticast = 0)'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Disable LLMNR (EnableMulticast = 0) FAILED: $($_.Exception.Message)"
     }
-    if (!$netBiosDiscoveryReady) {
+    $script:NetBiosAdapters = @()
+    $stepNetBios = 'Discover IP-enabled adapters before changing NetBIOS (CIM failure skips NetBIOS changes)'
+    try {
+        $script:NetBiosAdapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop)
+        $script:Results.Add([pscustomobject]@{ Step=$stepNetBios; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepNetBios"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepNetBios; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepNetBios FAILED: $($_.Exception.Message)"
+    }
+    if ($script:NetBiosAdapters.Count -eq 0) {
         Write-Warning 'Adapter discovery was skipped or failed. NetBIOS settings were not changed; review CIM/WMI health before retrying.'
     }
     foreach ($nic in $script:NetBiosAdapters) {
-        Invoke-Step "Disable NetBIOS over TCP/IP on adapter: $($nic.Description)" {
+        $stepNic = "Disable NetBIOS over TCP/IP on adapter: $($nic.Description)"
+        try {
             $outcome = Invoke-CimMethod -InputObject $nic -MethodName SetTcpipNetbios -Arguments @{TcpipNetbiosOptions=[uint32]2} -ErrorAction Stop
             if ($outcome.ReturnValue -notin 0,1) { throw "NetBIOS change failed: $($outcome.ReturnValue)" }
             if ($outcome.ReturnValue -eq 1) { Write-Warning 'NetBIOS change needs a restart.' }
-        } | Out-Null
+            $script:Results.Add([pscustomobject]@{ Step=$stepNic; Status='Completed'; Error='' })
+            Write-Host "[Completed] $stepNic"
+        } catch {
+            $script:Results.Add([pscustomobject]@{ Step=$stepNic; Status='Failed'; Error=$_.Exception.Message })
+            Write-Warning "$stepNic FAILED: $($_.Exception.Message)"
+        }
     }
     foreach ($tunnel in 'teredo','6to4','isatap') {
-        Invoke-Step "Disable IPv6 $tunnel tunnel" {
+        $stepTunnel = "Disable IPv6 $tunnel tunnel"
+        try {
             $arguments = if ($tunnel -eq 'teredo') { @('interface','teredo','set','state','disabled') }
                 else { @('interface','ipv6',$tunnel,'set','state','state=disabled') }
             Invoke-Native netsh.exe $arguments
-        } | Out-Null
+            $script:Results.Add([pscustomobject]@{ Step=$stepTunnel; Status='Completed'; Error='' })
+            Write-Host "[Completed] $stepTunnel"
+        } catch {
+            $script:Results.Add([pscustomobject]@{ Step=$stepTunnel; Status='Failed'; Error=$_.Exception.Message })
+            Write-Warning "$stepTunnel FAILED: $($_.Exception.Message)"
+        }
     }
-    Set-RegistryDword 'Keep native IPv6 enabled and undo any previous DisabledComponents setting (restart required if previously disabled)' `
-        'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' 'DisabledComponents' 0 -CompletionStatus PendingRestart
+    $stepIpv6Reg = 'Keep native IPv6 enabled and undo any previous DisabledComponents setting (restart required if previously disabled) (DisabledComponents = 0)'
+    try {
+        $tcpip6Key = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters'
+        if (!(Test-Path -LiteralPath $tcpip6Key -ErrorAction Stop)) {
+            New-Item -Path $tcpip6Key -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -LiteralPath $tcpip6Key -Name 'DisabledComponents' -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        if ((Get-ItemProperty -LiteralPath $tcpip6Key -Name 'DisabledComponents' -ErrorAction Stop).DisabledComponents -ne 0) {
+            throw 'Registry readback did not match.'
+        }
+        $script:Results.Add([pscustomobject]@{ Step=$stepIpv6Reg; Status='PendingRestart'; Error='' })
+        Write-Host "[PendingRestart] $stepIpv6Reg"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepIpv6Reg; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepIpv6Reg FAILED: $($_.Exception.Message)"
+    }
     foreach ($serviceName in 'Spooler','RemoteRegistry') {
-        Invoke-Step "Stop service $serviceName" {
-            Stop-Service -Name $serviceName -Force
-            if ((Get-Service $serviceName).Status -ne 'Stopped') { throw 'Service did not stop.' }
-        } | Out-Null
-        Invoke-Step "Disable service $serviceName startup" {
-            Set-Service -Name $serviceName -StartupType Disabled
-        } | Out-Null
+        $stepStop = "Stop service $serviceName"
+        try {
+            Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+            if ((Get-Service $serviceName -ErrorAction SilentlyContinue).Status -eq 'Running') { throw 'Service did not stop.' }
+            $script:Results.Add([pscustomobject]@{ Step=$stepStop; Status='Completed'; Error='' })
+            Write-Host "[Completed] $stepStop"
+        } catch {
+            $script:Results.Add([pscustomobject]@{ Step=$stepStop; Status='Failed'; Error=$_.Exception.Message })
+            Write-Warning "$stepStop FAILED: $($_.Exception.Message)"
+        }
+        $stepDisable = "Disable service $serviceName startup"
+        try {
+            Set-Service -Name $serviceName -StartupType Disabled -ErrorAction Stop
+            $script:Results.Add([pscustomobject]@{ Step=$stepDisable; Status='Completed'; Error='' })
+            Write-Host "[Completed] $stepDisable"
+        } catch {
+            $script:Results.Add([pscustomobject]@{ Step=$stepDisable; Status='Failed'; Error=$_.Exception.Message })
+            Write-Warning "$stepDisable FAILED: $($_.Exception.Message)"
+        }
     }
     Invoke-Step 'Set WinRM startup to Automatic and start it (AD WinRM is scored; listeners/authentication are verified separately)' {
         Set-Service -Name WinRM -StartupType Automatic
@@ -1616,21 +1767,39 @@ if ($Mode -ne 'Audit') {
         Set-NativeFirewallBlockRule -RuleName 'CCDC-AD-Block-HTTPS' -Protocol TCP -Port @('443')
     } | Out-Null
 
-    Invoke-Step 'Enable Windows Firewall on all profiles after preparing AD allow rules' {
+    $stepFwEnable = 'Enable Windows Firewall on all profiles after preparing AD allow rules'
+    try {
         if (!$tcpReady -or !$udpReady -or !$scoredRulesReady -or !$icmpReady) {
             throw 'Required AD, scoring, or ICMP allow rules were skipped or failed. Firewall activation was not changed; review existing rules manually.'
         }
         Set-NativeFirewallProfiles -Setting Enabled
-    } | Out-Null
-    Invoke-Step 'Block unmatched inbound traffic and allow outbound traffic' {
+        $script:Results.Add([pscustomobject]@{ Step=$stepFwEnable; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepFwEnable"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepFwEnable; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepFwEnable FAILED: $($_.Exception.Message)"
+    }
+    $stepFwDefault = 'Block unmatched inbound traffic and allow outbound traffic'
+    try {
         if (!$tcpReady -or !$udpReady -or !$scoredRulesReady -or !$icmpReady) {
             throw 'Required AD, scoring, or ICMP allow rules were skipped or failed. Default policy was not changed; review existing rules manually.'
         }
         Set-NativeFirewallProfiles -Setting DefaultPolicy
-    } | Out-Null
-    Invoke-Step 'Enable firewall allowed/blocked traffic logging (32 MB per profile)' {
+        $script:Results.Add([pscustomobject]@{ Step=$stepFwDefault; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepFwDefault"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepFwDefault; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepFwDefault FAILED: $($_.Exception.Message)"
+    }
+    $stepFwLogging = 'Enable firewall allowed/blocked traffic logging (32 MB per profile)'
+    try {
         Set-NativeFirewallProfiles -Setting Logging
-    } | Out-Null
+        $script:Results.Add([pscustomobject]@{ Step=$stepFwLogging; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepFwLogging"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepFwLogging; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepFwLogging FAILED: $($_.Exception.Message)"
+    }
     Export-Evidence 'Connections' {
         try {
             $dnsPid = (Get-Process dns -ErrorAction SilentlyContinue).Id
@@ -1645,16 +1814,31 @@ if ($Mode -ne 'Audit') {
     }
 
     Write-Host "`n4. Audit and logging" -ForegroundColor Cyan
-    Set-RegistryDword 'Use advanced audit subcategories instead of legacy audit policy' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'SCENoApplyLegacyAuditPolicy' 1
-    Invoke-Step 'Enable success/failure auditing for all categories' { Invoke-Native auditpol.exe @('/set','/category:*','/success:enable','/failure:enable') } | Out-Null
-    Set-RegistryDword 'Enable PowerShell script block logging' 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging' 1
-    Invoke-Step 'Enable PowerShell module logging for all modules' {
+    Set-RegistryDwordDirect 'Use advanced audit subcategories instead of legacy audit policy' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'SCENoApplyLegacyAuditPolicy' 1
+    $stepAuditpol = 'Enable success/failure auditing for all categories'
+    try {
+        Invoke-Native auditpol.exe @('/set','/category:*','/success:enable','/failure:enable')
+        $script:Results.Add([pscustomobject]@{ Step=$stepAuditpol; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepAuditpol"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepAuditpol; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepAuditpol FAILED: $($_.Exception.Message)"
+    }
+    Set-RegistryDwordDirect 'Enable PowerShell script block logging' 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging' 1
+    $stepModLog = 'Enable PowerShell module logging for all modules'
+    try {
         $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging'
         New-Item -Path "$key\ModuleNames" -Force | Out-Null
         New-ItemProperty -Path $key -Name EnableModuleLogging -Value 1 -PropertyType DWord -Force | Out-Null
         New-ItemProperty -Path "$key\ModuleNames" -Name '*' -Value '*' -PropertyType String -Force | Out-Null
-    } | Out-Null
-    Invoke-Step 'Enable PowerShell transcription to the protected report directory' {
+        $script:Results.Add([pscustomobject]@{ Step=$stepModLog; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepModLog"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepModLog; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepModLog FAILED: $($_.Exception.Message)"
+    }
+    $stepTranscript = 'Enable PowerShell transcription to the protected report directory'
+    try {
         if (!$script:CanWriteReport) { throw 'Protected report directory was skipped or failed; transcription was not enabled.' }
         $transcripts = Join-Path $report 'Transcripts'
         New-Item -ItemType Directory -Path $transcripts -Force | Out-Null
@@ -1662,10 +1846,15 @@ if ($Mode -ne 'Audit') {
         New-Item -Path $key -Force | Out-Null
         New-ItemProperty -Path $key -Name EnableTranscripting -Value 1 -PropertyType DWord -Force | Out-Null
         New-ItemProperty -Path $key -Name OutputDirectory -Value $transcripts -PropertyType String -Force | Out-Null
-    } | Out-Null
-    Set-RegistryDword 'Include command lines in process creation events' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled' 1
-    Set-RegistryDword 'Enable UAC (may require a later reboot)' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLUA' 1
-    Set-RegistryDword 'Require administrator consent on the secure desktop' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin' 2
+        $script:Results.Add([pscustomobject]@{ Step=$stepTranscript; Status='Completed'; Error='' })
+        Write-Host "[Completed] $stepTranscript"
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step=$stepTranscript; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "$stepTranscript FAILED: $($_.Exception.Message)"
+    }
+    Set-RegistryDwordDirect 'Include command lines in process creation events' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled' 1
+    Set-RegistryDwordDirect 'Enable UAC (may require a later reboot)' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLUA' 1
+    Set-RegistryDwordDirect 'Require administrator consent on the secure desktop' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin' 2
     Write-Host 'Defender installation, real-time protection enabling and signature updates run separately: .\DC.ps1 -Defender. This walkthrough only checks installation.'
     Write-Host "`n5. AD hardening and triage" -ForegroundColor Cyan
     Set-RegistryDword 'Require NTLMv2 and refuse LM/NTLMv1' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LmCompatibilityLevel' 5
@@ -1726,7 +1915,7 @@ Export-Evidence 'ReplicationACL' {
             [guid]'89e95b76-444d-4c62-991a-0facbeda640c',[guid]::Empty -or "$($_.ActiveDirectoryRights)" -match 'GenericAll'
     }
 }
-Export-Evidence 'RecentEvents' {
+Export-Evidence 'RecentEvents' -NoDisplay {
     foreach ($log in 'Security','System') {
         $ids = if ($log -eq 'Security') { @(4624,4625,4648,4720,4728,4732,4740,4756,4767,4768,4769,4776,1102) } else { @(7045) }
         $eventErrors = @()
@@ -1760,13 +1949,23 @@ if ($Mode -ne 'Audit') {
     } | Out-Null
 }
 if ($script:CanWriteReport) {
-    Invoke-Step 'Export domain GPO report' {
-        Import-Module GroupPolicy
+    try {
+        Import-Module GroupPolicy -ErrorAction Stop
         Get-GPOReport -All -ReportType Html -Path (Join-Path $report 'GPO.html') -Server $adServer
-    } | Out-Null
-    Invoke-Step 'Save walkthrough results.csv in the protected report directory' {
+        $script:Results.Add([pscustomobject]@{ Step='Export domain GPO report'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Export domain GPO report'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Export domain GPO report'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Export domain GPO report FAILED: $($_.Exception.Message)"
+    }
+    try {
         $script:Results | Export-Csv -LiteralPath (Join-Path $report 'results.csv') -NoTypeInformation
-    } | Out-Null
+        $script:Results.Add([pscustomobject]@{ Step='Save walkthrough results.csv in the protected report directory'; Status='Completed'; Error='' })
+        Write-Host '[Completed] Save walkthrough results.csv in the protected report directory'
+    } catch {
+        $script:Results.Add([pscustomobject]@{ Step='Save walkthrough results.csv in the protected report directory'; Status='Failed'; Error=$_.Exception.Message })
+        Write-Warning "Save walkthrough results.csv in the protected report directory FAILED: $($_.Exception.Message)"
+    }
     Write-Host "Report directory: $report"
 }
 $script:Results | Format-Table -AutoSize
