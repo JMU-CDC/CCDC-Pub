@@ -1,4 +1,4 @@
-* **Account Backdoors & Manipulation** (Created, deleted, password reset, log cleared):
+* **Account Backdoors & Manipulation**
   ```spl
   index=velociraptor EventID IN (4720, 4722, 4724, 4726, 4728, 4732, 4738, 4756, 1102)
   | table _time Computer EventID EventData.SubjectUserName EventData.TargetUserName
@@ -41,7 +41,38 @@
 * **SSH Brute Force**:
   ```spl
   index=velociraptor Artifact="Custom.Linux.Events.All" AppName=sshd ("Failed password" OR "authentication failure")
-| rex field=Message "from (?<src_ip>\S+)"
-| stats count by Hostname, src_ip
-| where count > 5
+  | rex field=Message "from (?<src_ip>\S+)"
+  | stats count by Hostname, src_ip
+  | where count > 5
   ```
+
+---
+
+### LOW PRIORITY ALERTS DO ONLY WHEN DOWNTIME
+
+* **Endpoint Stopped Reporting (Agent Down / Offline)**:
+  ```spl
+  index=velociraptor Artifact="Generic.Client.Stats"
+  | stats latest(_time) as last_seen by Hostname
+  | eval minutes_ago=(now() - last_seen)/60
+  | where minutes_ago > 5
+  ```
+
+* **Successful RDP Logins (Windows)**:
+  ```spl
+  index=velociraptor EventID=4624 EventData.LogonType=10
+  | table _time Computer EventData.TargetUserName EventData.IpAddress
+  ```
+
+* **System Event Log Cleared (Windows)**:
+  ```spl
+  index=velociraptor Channel="System" EventID=104
+  | table _time Computer
+  ```
+
+* **Software Installed or Removed (Linux)**:
+  ```spl
+  index=velociraptor Artifact="Custom.Linux.Events.All" ("apt" OR "yum" OR "dnf" OR "dpkg" OR "rpm")
+  | table _time Hostname AppName Message
+  ```
+
