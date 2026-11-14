@@ -342,6 +342,27 @@ Invoke-Step 'Enable Success/Failure Auditing' {
 Set-RegistryDword 'Enable PowerShell Script Block Logging' 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging' 1
 Set-RegistryDword 'Include command lines in process creation events' 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 'ProcessCreationIncludeCmdLine_Enabled' 1
 
+$transDir = "C:\ProgramData\CCDC\MSSQL\Transcripts"
+if (!(Test-Path $transDir)) { 
+    New-Item -ItemType Directory -Path $transDir -Force | Out-Null 
+    icacls $transDir /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
+}
+$transPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription"
+if (!(Test-Path $transPath)) { New-Item -Path $transPath -Force | Out-Null }
+New-ItemProperty -LiteralPath $transPath -Name "EnableTranscripting" -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -LiteralPath $transPath -Name "EnableInvocationHeader" -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -LiteralPath $transPath -Name "OutputDirectory" -Value $transDir -PropertyType String -Force | Out-Null
+
+$modPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging"
+if (!(Test-Path $modPath)) { New-Item -Path $modPath -Force | Out-Null }
+New-ItemProperty -LiteralPath $modPath -Name "EnableModuleLogging" -Value 1 -PropertyType DWord -Force | Out-Null
+$modNames = "$modPath\ModuleNames"
+if (!(Test-Path $modNames)) { New-Item -Path $modNames -Force | Out-Null }
+New-ItemProperty -LiteralPath $modNames -Name "*" -Value "*" -PropertyType String -Force | Out-Null
+
+wevtutil sl "Security" /ms:536870912 /rt:false /ab:true
+wevtutil sl "Microsoft-Windows-PowerShell/Operational" /ms:268435456 /rt:false /ab:true
+
 # --- REPORTING ---
 if ($script:CanWriteReport) {
     $script:Results | Export-Csv -LiteralPath (Join-Path $report 'results.csv') -NoTypeInformation
