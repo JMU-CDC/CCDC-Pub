@@ -32,7 +32,7 @@ param(
     [string]$Selection,
 
     [Parameter(Position = 1)]
-    [string]$Destination = ".\CCDC-Windows",
+    [string]$Destination = ".",
 
     [switch]$Plans,
     [switch]$GPO,
@@ -388,7 +388,8 @@ if (-not $All -and -not $Plans -and -not $GPO -and -not $Scripts -and -not $Tool
     }
     $Selection = $rawChoice.Trim()
 
-    $destInput = Read-Host "Enter destination directory [Press Enter for default: '$Destination']"
+    $currentDirDisplay = (Get-Location).Path
+    $destInput = Read-Host "Enter destination directory [Press Enter for current directory: '$currentDirDisplay']"
     if (-not [string]::IsNullOrWhiteSpace($destInput)) {
         $Destination = $destInput.Trim().Trim('"').Trim("'")
     }
@@ -462,6 +463,14 @@ if (-not (Test-Path -Path $resolvedDest)) {
     New-Item -ItemType Directory -Path $resolvedDest -Force | Out-Null
 }
 
+# If running elevated, attempt to add Defender folder exclusion to prevent malware false-positives
+try {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        Add-MpPreference -ExclusionPath $resolvedDest -ErrorAction SilentlyContinue
+    }
+} catch {}
+
 Write-Host "`nTarget Destination: $resolvedDest" -ForegroundColor Cyan
 Write-Host "Queue: $($selectedItems.Count) item(s) to download." -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
@@ -483,6 +492,8 @@ foreach ($item in $selectedItems) {
     $ok = Download-FileWithProgress -Url $rawUrl -OutFile $targetPath -DisplayName "$($item.Category)/$($item.Name)" -SizeInfo $item.Size
     if ($ok) {
         $successCount++
+        # Strip Zone.Identifier (Mark-of-the-Web)
+        Unblock-File -Path $targetPath -ErrorAction SilentlyContinue
         if ($Unzip -and $item.Name.EndsWith(".zip")) {
             $extractFolder = Join-Path (Split-Path -Path $targetPath -Parent) [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
             try {
