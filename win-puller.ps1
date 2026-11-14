@@ -61,7 +61,7 @@ $Manifest = @(
         Id          = 1
         Category    = "Plans"
         Name        = "5_DC.ps1"
-        RelativeUri = "five_min_plans/5_DC.ps1"
+        RelativeUri = "5_min_plans/5_DC.ps1"
         Size        = "114 KB"
         Description = "Active Directory Domain Controller Hardening Plan"
     },
@@ -69,7 +69,7 @@ $Manifest = @(
         Id          = 2
         Category    = "Plans"
         Name        = "5_win_wks.ps1"
-        RelativeUri = "five_min_plans/5_win_wks.ps1"
+        RelativeUri = "5_min_plans/5_win_wks.ps1"
         Size        = "25 KB"
         Description = "Windows Workstation Hardening Plan"
     },
@@ -77,7 +77,7 @@ $Manifest = @(
         Id          = 3
         Category    = "Plans"
         Name        = "5_MSSQL.ps1"
-        RelativeUri = "five_min_plans/5_MSSQL.ps1"
+        RelativeUri = "5_min_plans/5_MSSQL.ps1"
         Size        = "18 KB"
         Description = "MSSQL Server Hardening Plan"
     },
@@ -85,7 +85,7 @@ $Manifest = @(
         Id          = 4
         Category    = "Plans"
         Name        = "5_paloalto_api.ps1"
-        RelativeUri = "five_min_plans/5_paloalto_api.ps1"
+        RelativeUri = "5_min_plans/5_paloalto_api.ps1"
         Size        = "21 KB"
         Description = "Palo Alto XML API Hardener (Run from Windows 7+)"
     },

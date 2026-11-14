@@ -996,16 +996,19 @@ function Set-NativeFirewallProfiles {
 }
 
 function Export-Evidence {
-    param([string]$Name, [scriptblock]$Query, [switch]$NoDisplay)
-    $stepName = if ($NoDisplay -or $Name -eq 'RecentEvents') { "Export $Name" } else { "Review/export $Name" }
+    param([string]$Name, [scriptblock]$Query, [switch]$Display)
+    $stepName = "Export $Name"
     try {
         $data = & $Query
-        if (!$NoDisplay -and $Name -ne 'RecentEvents') {
+        if ($Display) {
             $data | Out-Host
         }
-        if ($script:CanWriteReport) { $data | Export-Clixml -LiteralPath (Join-Path $report "$Name.xml") -Depth 6 }
+        if ($script:CanWriteReport) {
+            $data | Export-Clixml -LiteralPath (Join-Path $report "$Name.xml") -Depth 4
+        }
+        $count = if ($null -eq $data) { 0 } elseif ($data -is [System.Collections.ICollection]) { $data.Count } else { @($data).Count }
         $script:Results.Add([pscustomobject]@{ Step=$stepName; Status='Completed'; Error='' })
-        Write-Host "[Completed] $stepName"
+        Write-Host "[Completed] $stepName ($count item(s) saved)" -ForegroundColor Green
     } catch {
         $script:Results.Add([pscustomobject]@{ Step=$stepName; Status='Failed'; Error=$_.Exception.Message })
         Write-Warning "$stepName FAILED: $($_.Exception.Message)"
@@ -1415,10 +1418,10 @@ $script:InitialServiceInventory = $null
 Write-Host '[*] Discovering installed services/listeners/sites BEFORE any password or hardening changes...' -ForegroundColor Cyan
 try {
     $script:InitialServiceInventory = Get-ServiceBaseline
-    $script:InitialServiceInventory.Endpoints | Sort-Object Port,Protocol | Format-Table -Wrap -AutoSize | Out-Host
-    $script:InitialServiceInventory.Features | Format-Table -AutoSize | Out-Host
-    $script:InitialServiceInventory.Shares | Format-Table -AutoSize | Out-Host
-    if ($script:InitialServiceInventory.IisSitesXml) { Write-Host $script:InitialServiceInventory.IisSitesXml }
+    $epCount = if ($script:InitialServiceInventory.Endpoints) { $script:InitialServiceInventory.Endpoints.Count } else { 0 }
+    $ftCount = if ($script:InitialServiceInventory.Features)  { $script:InitialServiceInventory.Features.Count } else { 0 }
+    $shCount = if ($script:InitialServiceInventory.Shares)    { $script:InitialServiceInventory.Shares.Count } else { 0 }
+    Write-Host "   Discovered $epCount listening endpoint(s), $ftCount feature(s), $shCount share(s)." -ForegroundColor Gray
     foreach ($issue in $script:InitialServiceInventory.Issues) { Write-Warning "$($issue.Source): $($issue.Error)" }
     $script:Results.Add([pscustomobject]@{ Step='Discover installed services/listeners/sites'; Status='Completed'; Error='' })
 } catch {
@@ -1915,7 +1918,7 @@ Export-Evidence 'ReplicationACL' {
             [guid]'89e95b76-444d-4c62-991a-0facbeda640c',[guid]::Empty -or "$($_.ActiveDirectoryRights)" -match 'GenericAll'
     }
 }
-Export-Evidence 'RecentEvents' -NoDisplay {
+Export-Evidence 'RecentEvents' {
     foreach ($log in 'Security','System') {
         $ids = if ($log -eq 'Security') { @(4624,4625,4648,4720,4728,4732,4740,4756,4767,4768,4769,4776,1102) } else { @(7045) }
         $eventErrors = @()

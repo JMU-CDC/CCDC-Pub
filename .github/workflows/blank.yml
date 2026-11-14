@@ -28,7 +28,7 @@ jobs:
             --exclude='*.tbz2' \
             --exclude='*.tar.xz' \
             --exclude='*.txz' \
-            five_min_plans
+            5_min_plans
 
       # Only on pushes to main; PRs (esp. from forks) have a read-only token
       - name: Commit tarball to repo
