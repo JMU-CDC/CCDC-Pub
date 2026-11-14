@@ -41,6 +41,7 @@
 * **SSH Brute Force**:
   ```spl
   index=velociraptor Artifact="Custom.Linux.Events.All" AppName=sshd ("Failed password" OR "authentication failure")
-  | stats count by Hostname Message
-  | where count > 5
+| rex field=Message "from (?<src_ip>\S+)"
+| stats count by Hostname, src_ip
+| where count > 5
   ```
