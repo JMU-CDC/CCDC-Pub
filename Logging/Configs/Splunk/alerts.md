@@ -29,6 +29,24 @@
   | table _time Computer EventID EventData
   ```
 
+* **Suspicious Process Creation / Credential Dumping**:
+  ```spl
+  index=velociraptor (EventID=4688 OR Artifact="Windows.Events.ProcessCreation") ("vssadmin" OR "mimikatz" OR "procdump" OR "reg save" OR "ntdsutil" OR "certutil -urlcache")
+  | table _time Computer CommandLine ParentCommandLine SubjectUserName
+  ```
+
+* **Defender Tampering / Disabled**:
+  ```spl
+  index=velociraptor Channel="*Defender*" EventID IN (5001, 5007)
+  | table _time Computer EventID EventData
+  ```
+
+* **RDP Session Hijacking / Reconnect**:
+  ```spl
+  index=velociraptor Channel="*LocalSessionManager*" EventID IN (24, 25)
+  | table _time Computer EventID UserData.User UserData.Address
+  ```
+
 ---
 
 
@@ -44,6 +62,19 @@
   | rex field=Message "from (?<src_ip>\S+)"
   | stats count by Hostname, src_ip
   | where count > 5
+  ```
+
+* **Successful Root Login via SSH**:
+  ```spl
+  index=velociraptor Artifact="Custom.Linux.Events.All" AppName=sshd "Accepted" "for root"
+  | rex field=Message "from (?<src_ip>\S+)"
+  | table _time Hostname src_ip Message
+  ```
+
+* **Interactive `su` to Root**:
+  ```spl
+  index=velociraptor Artifact="Custom.Linux.Events.All" AppName=su "Successful su for root"
+  | table _time Hostname Message
   ```
 
 ---
@@ -75,4 +106,3 @@
   index=velociraptor Artifact="Custom.Linux.Events.All" ("apt" OR "yum" OR "dnf" OR "dpkg" OR "rpm")
   | table _time Hostname AppName Message
   ```
-
